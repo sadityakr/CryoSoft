@@ -1,4 +1,4 @@
-# CryoSoft CI for GitLab.
+# I2AS CI for GitLab.
 #
 # Mirrors .github/workflows/ci.yml: both are thin wrappers that call the same
 # Makefile targets, so checks added to the Makefile apply to both CI systems

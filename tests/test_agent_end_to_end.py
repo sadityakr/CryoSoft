@@ -27,37 +27,37 @@ from typing import Any
 
 import pytest
 
-import cryosoft
-from cryosoft.analysis.report import AnalysisReport
-from cryosoft.core import events as ev
-from cryosoft.core.orchestrator import Orchestrator
-from cryosoft.core.station import build_station
-from cryosoft.procedures.field_imaging import FieldImaging
-from cryosoft.procedures.field_sweep import FieldSweep
-from cryosoft.session.agent_feed import (
+import i2as
+from i2as.analysis.report import AnalysisReport
+from i2as.core import events as ev
+from i2as.core.orchestrator import Orchestrator
+from i2as.core.station import build_station
+from i2as.procedures.field_imaging import FieldImaging
+from i2as.procedures.field_sweep import FieldSweep
+from i2as.session.agent_feed import (
     RECORD_COMMAND,
     RECORD_TOOL,
     RECORD_VERDICT,
     AgentFeed,
     read_feed,
 )
-from cryosoft.session.analysis_runner import AnalysisRunner
-from cryosoft.session.eln.outbox import DRAIN_PUBLISHED
-from cryosoft.session.eln.publisher import ElnPublisher
-from cryosoft.session.eln.settings import AnalysisSettings, ElnSettings
-from cryosoft.session.eln.sim_eln import SimElnAdapter
-from cryosoft.session.gateway import Gateway, Role, ToolContext
-from cryosoft.session.gateway.gateway import event_stream
-from cryosoft.session.manager import ExperimentManager
-from cryosoft.session.models import User
-from cryosoft.session.store import ExperimentStore, UserRoster
+from i2as.session.analysis_runner import AnalysisRunner
+from i2as.session.eln.outbox import DRAIN_PUBLISHED
+from i2as.session.eln.publisher import ElnPublisher
+from i2as.session.eln.settings import AnalysisSettings, ElnSettings
+from i2as.session.eln.sim_eln import SimElnAdapter
+from i2as.session.gateway import Gateway, Role, ToolContext
+from i2as.session.gateway.gateway import event_stream
+from i2as.session.manager import ExperimentManager
+from i2as.session.models import User
+from i2as.session.store import ExperimentStore, UserRoster
 
 pytestmark = pytest.mark.skipif(
     sys.platform.startswith("win"), reason="POSIX subprocess semantics assumed"
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-CONFIGS_DIR = Path(cryosoft.__file__).parent / "configs"
+CONFIGS_DIR = Path(i2as.__file__).parent / "configs"
 
 ACTOR_ID = "agent-e2e"
 SAMPLE_INFO = {"sample_name": "S", "sample_id": "S-1", "comments": ""}
@@ -146,7 +146,7 @@ class Wired:
 
 
 def _wire(example: Example, tmp_path: Path) -> Wired:
-    """The wiring ``cryosoft.main`` does, over one example's sim station.
+    """The wiring ``i2as.main`` does, over one example's sim station.
 
     One deliberate difference: the publisher's ``analysis_requested`` is NOT
     connected to the runner. In the application a finished run is analysed

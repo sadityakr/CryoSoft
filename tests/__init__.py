@@ -1,1 +1,1 @@
-"""Test suite for CryoSoft."""
+"""Test suite for I2AS."""

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from cryosoft.core.ramps import ACTIVE_RAMP_STATUS, RampRecord, build_ramp_records
+from i2as.core.ramps import ACTIVE_RAMP_STATUS, RampRecord, build_ramp_records
 
 
 def _meta(vi_name: str) -> tuple[str, str]:

@@ -1,6 +1,6 @@
 ---
 name: gui-edit
-description: How to modify the I2AS GUI layer (cryosoft/gui/) correctly - theme tokens, Qt dynamic-property styling, layout rules, notification policy, and the mandatory offscreen screenshot verification. Use for any change to GUI widgets, styling, colors, layout, or GUI tests.
+description: How to modify the I2AS GUI layer (i2as/gui/) correctly - theme tokens, Qt dynamic-property styling, layout rules, notification policy, and the mandatory offscreen screenshot verification. Use for any change to GUI widgets, styling, colors, layout, or GUI tests.
 ---
 
 # gui-edit — editing the I2AS GUI layer
@@ -15,23 +15,23 @@ one allowed exception). CI runs `make check` (lint, contracts, and the suite in 
 
 | File | Role |
 |------|------|
-| `cryosoft/gui/theme.py` | ALL colors and QSS live here (tokens + `build_stylesheet()`) |
-| `cryosoft/gui/monitor_window.py` | Main window (composition shell): quadrant splitters, banner, status bar, menus, signal wiring |
-| `cryosoft/gui/trends_quadrant.py` | Trends quadrant: TrendPlotPanel grid + MonitorHistory + persistence |
-| `cryosoft/gui/experiment_info_panel.py` | Experiment-tier quadrant (Start/Close control + name/ID/comments/data dir + eLab status line) |
-| `cryosoft/gui/experiment_dialogs.py` | Start/Close Experiment dialogs, shared `UserPickerWidget`, add-user dialog |
-| `cryosoft/gui/setup_dialogs.py` | Setup-tier dialogs: login (`LoginDialog`), read-only instrument info (`InstrumentInfoDialog`) |
-| `cryosoft/gui/log_panel.py` | Log widget + `QtLogHandler` (attach/detach lifecycle) |
-| `cryosoft/gui/procedure_window.py` | Procedure window (composition shell): quadrants, run/queue/abort flows, two `LivePlotPanel`s |
-| `cryosoft/gui/procedure_params_panel.py` | Procedure selector + parameter form + param cache (the params quadrant) |
-| `cryosoft/gui/queue_panel.py` | Run-queue list, per-item status, Orchestrator queue sync |
-| `cryosoft/gui/procedure_discovery.py` | Qt-free BaseProcedure auto-discovery |
-| `cryosoft/gui/window_geometry.py` | Shared geometry restore/save helpers for both windows |
-| `cryosoft/gui/instrument_panel.py` | Auto-generated per-VI panel (from decorator metadata) |
-| `cryosoft/gui/instrument_front_panel.py` | Per-VI full-capability child window (all monitored values + all controls) |
-| `cryosoft/gui/live_plot_panel.py` | Reusable X/Y live plot widget |
-| `cryosoft/gui/notification_banner.py` | Non-modal warning/error strip |
-| `cryosoft/gui/app_settings.py` | QSettings factory — the test seam |
+| `i2as/gui/theme.py` | ALL colors and QSS live here (tokens + `build_stylesheet()`) |
+| `i2as/gui/monitor_window.py` | Main window (composition shell): quadrant splitters, banner, status bar, menus, signal wiring |
+| `i2as/gui/trends_quadrant.py` | Trends quadrant: TrendPlotPanel grid + MonitorHistory + persistence |
+| `i2as/gui/experiment_info_panel.py` | Experiment-tier quadrant (Start/Close control + name/ID/comments/data dir + eLab status line) |
+| `i2as/gui/experiment_dialogs.py` | Start/Close Experiment dialogs, shared `UserPickerWidget`, add-user dialog |
+| `i2as/gui/setup_dialogs.py` | Setup-tier dialogs: login (`LoginDialog`), read-only instrument info (`InstrumentInfoDialog`) |
+| `i2as/gui/log_panel.py` | Log widget + `QtLogHandler` (attach/detach lifecycle) |
+| `i2as/gui/procedure_window.py` | Procedure window (composition shell): quadrants, run/queue/abort flows, two `LivePlotPanel`s |
+| `i2as/gui/procedure_params_panel.py` | Procedure selector + parameter form + param cache (the params quadrant) |
+| `i2as/gui/queue_panel.py` | Run-queue list, per-item status, Orchestrator queue sync |
+| `i2as/gui/procedure_discovery.py` | Qt-free BaseProcedure auto-discovery |
+| `i2as/gui/window_geometry.py` | Shared geometry restore/save helpers for both windows |
+| `i2as/gui/instrument_panel.py` | Auto-generated per-VI panel (from decorator metadata) |
+| `i2as/gui/instrument_front_panel.py` | Per-VI full-capability child window (all monitored values + all controls) |
+| `i2as/gui/live_plot_panel.py` | Reusable X/Y live plot widget |
+| `i2as/gui/notification_banner.py` | Non-modal warning/error strip |
+| `i2as/gui/app_settings.py` | QSettings factory — the test seam |
 | `tests/test_gui.py` | pytest-qt suite; run with `-p no:randomly` when run alone |
 
 Destruction-order rule: Orchestrator signals that feed child panels (e.g.
@@ -90,7 +90,7 @@ tree (RuntimeError/segfault on a deleted plot curve under pytest-qt).
 ## Verification (all three, every time)
 
 1. `python -m pytest tests/test_gui.py -q -p no:randomly` from the activated
-   `.venv`, then again with `CRYOSOFT_INSTRUMENT_THREAD=0` (the inline leg
+   `.venv`, then again with `I2AS_INSTRUMENT_THREAD=0` (the inline leg
    `make test-instrument-inline` runs) — a handler that only holds inline is
    a bug the threaded default will expose.
 2. Full suite: `make check`.

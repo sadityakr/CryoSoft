@@ -11,17 +11,17 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from cryosoft.core.data_reader import ROLE_IMAGE, open_run
-from cryosoft.core.exceptions import CryoSoftConfigError
-from cryosoft.core.gates import Gate
-from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
-from cryosoft.core.plan import Command, PhasePlan, StepPlan, Target
-from cryosoft.core.run_builder import build_procedure
-from cryosoft.core.station import build_station
-from cryosoft.procedures.field_imaging import FieldImaging
+from i2as.core.data_reader import ROLE_IMAGE, open_run
+from i2as.core.exceptions import I2ASConfigError
+from i2as.core.gates import Gate
+from i2as.core.orchestrator import Orchestrator, OrchestratorState
+from i2as.core.plan import Command, PhasePlan, StepPlan, Target
+from i2as.core.run_builder import build_procedure
+from i2as.core.station import build_station
+from i2as.procedures.field_imaging import FieldImaging
 
-IMAGING_CONFIG = "cryosoft/configs/sim_imaging"
-CRYOSTAT_CONFIG = "cryosoft/configs/sim_cryostat"
+IMAGING_CONFIG = "i2as/configs/sim_imaging"
+CRYOSTAT_CONFIG = "i2as/configs/sim_cryostat"
 
 SAMPLE_INFO = {"sample_name": "Domain sample", "sample_id": "IMG-001", "comments": ""}
 
@@ -77,7 +77,7 @@ def test_stage_roles_are_told_apart_by_axis(station):
 
 
 def test_a_stage_axis_that_is_not_a_candidate_is_refused(station, tmp_path):
-    with pytest.raises(CryoSoftConfigError):
+    with pytest.raises(I2ASConfigError):
         _build(station, tmp_path, stage_x_vi="stage_y")
 
 

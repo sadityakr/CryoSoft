@@ -10,15 +10,15 @@ from __future__ import annotations
 
 import pytest
 
-from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
-from cryosoft.core.station import build_station
+from i2as.core.orchestrator import Orchestrator, OrchestratorState
+from i2as.core.station import build_station
 
 from tests import scenarios
 
 
 @pytest.fixture
 def station():
-    return build_station("cryosoft/configs/sim_cryostat")
+    return build_station("i2as/configs/sim_cryostat")
 
 
 @pytest.fixture
@@ -84,13 +84,13 @@ def test_measurement_instrument_returns_error_instead_of_data(station, orchestra
     something actually tries to use it, mirroring how a running procedure's
     sample() would see it.
     """
-    from cryosoft.core.exceptions import CryoSoftCommunicationError
+    from i2as.core.exceptions import I2ASCommunicationError
 
     vi = station.get_vi("dc_measurement")
     vi.initiate_measurement(current_A=1e-6)  # arm while healthy
     scenarios.measurement_error(station, "dc_measurement", driver_attr="_meter")
 
-    with pytest.raises(CryoSoftCommunicationError):
+    with pytest.raises(I2ASCommunicationError):
         vi.take_reading()
 
     snap = scenarios.snapshot(station, orchestrator)

@@ -8,7 +8,7 @@ import math
 
 import pytest
 
-from cryosoft.core.tiered_trend_logger import TieredTrendLogger
+from i2as.core.tiered_trend_logger import TieredTrendLogger
 
 
 class _ListHandler(logging.Handler):

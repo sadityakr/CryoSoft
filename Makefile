@@ -1,4 +1,4 @@
-# CryoSoft development checks — single source of truth for all quality gates.
+# I2AS development checks — single source of truth for all quality gates.
 #
 # CI (GitHub Actions now, GitLab CI after the migration) calls these targets;
 # keep all check logic HERE so the CI configs stay thin wrappers that never
@@ -10,7 +10,7 @@
 #                    with the instrument stack on its own thread — the default
 #   make test-instrument-inline
 #                    run the GUI suite again in the temporary inline mode
-#                    (CRYOSOFT_INSTRUMENT_THREAD=0) — the same assertions
+#                    (I2AS_INSTRUMENT_THREAD=0) — the same assertions
 #   make contracts   verify the layer import contracts (import-linter)
 #   make lint        ruff error-level lint (undefined names, unused imports)
 #   make typecheck   mypy basic mode — advisory, not part of `check` yet
@@ -31,13 +31,13 @@ test:
 
 # The instrument-thread flag's second half. `make test` runs everything on the
 # instrument thread, which is the default; this runs the GUI suite again with
-# `CRYOSOFT_INSTRUMENT_THREAD=0`, the temporary `inline` mode, which is the
+# `I2AS_INSTRUMENT_THREAD=0`, the temporary `inline` mode, which is the
 # one difference the windows are supposed not to be able to see. Only the GUI
 # suite, because it is the suite whose fixtures build through the
 # InstrumentHost and therefore honour the flag — see
 # tests/instrument_modes.py. This leg goes when `inline` does.
 test-instrument-inline:
-	CRYOSOFT_INSTRUMENT_THREAD=0 $(PYTHON) -m pytest -m "not hardware" \
+	I2AS_INSTRUMENT_THREAD=0 $(PYTHON) -m pytest -m "not hardware" \
 		tests/test_gui.py tests/test_instrument_thread.py
 
 contracts:

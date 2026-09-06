@@ -6,14 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from cryosoft.core.exceptions import CryoSoftCommunicationError
-from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
-from cryosoft.core.station import Station, build_station
-from cryosoft.drivers.sim_keithley_2182a import SimKeithley2182A
-from cryosoft.drivers.sim_lakeshore_335 import SimLakeshore335
-from cryosoft.virtual_instruments.base import BaseVirtualInstrument
+from i2as.core.exceptions import I2ASCommunicationError
+from i2as.core.orchestrator import Orchestrator, OrchestratorState
+from i2as.core.station import Station, build_station
+from i2as.drivers.sim_keithley_2182a import SimKeithley2182A
+from i2as.drivers.sim_lakeshore_335 import SimLakeshore335
+from i2as.virtual_instruments.base import BaseVirtualInstrument
 
-SIM_CONFIG = Path(__file__).parent.parent / "cryosoft" / "configs" / "sim_cryostat"
+SIM_CONFIG = Path(__file__).parent.parent / "i2as" / "configs" / "sim_cryostat"
 
 
 @pytest.fixture
@@ -31,7 +31,7 @@ def test_close_releases_the_session_and_is_idempotent():
     assert driver.get_temperature() > 0
     driver.close()
     driver.close()
-    with pytest.raises(CryoSoftCommunicationError):
+    with pytest.raises(I2ASCommunicationError):
         driver.get_temperature()
 
 
@@ -187,7 +187,7 @@ def test_attach_never_raises_when_ensure_connected_fails():
 
     class _FailsToReconnectDriver(_DetachableDriver):
         def ensure_connected(self) -> None:
-            raise CryoSoftCommunicationError("cannot reopen")
+            raise I2ASCommunicationError("cannot reopen")
 
     driver = _FailsToReconnectDriver("SIM::TEST")
     vi = _DetachWhenIdleNoOverrideVI({"main": driver})
@@ -211,7 +211,7 @@ def test_ping_verify_and_release_through_the_base_for_a_plain_double():
 def test_ping_returns_false_and_still_releases_when_unreachable():
     class _NeverAnswersDriver(_DetachableDriver):
         def get_idn(self) -> str:
-            raise CryoSoftCommunicationError("hung")
+            raise I2ASCommunicationError("hung")
 
     driver = _NeverAnswersDriver("SIM::TEST")
     vi = _DetachWhenIdleNoOverrideVI({"main": driver})
@@ -239,11 +239,11 @@ def test_shared_driver_alias_with_detach_when_idle_is_flagged_not_permitted():
     ``_detach()`` itself, which a VI cannot make. This test proves the
     SAME predicate that conformance test (and ``Station.
     disconnect_instrument()``, for its own analogous release path) trusts —
-    ``cryosoft.core.station._exclusive_aliases()`` — actually flags this
+    ``i2as.core.station._exclusive_aliases()`` — actually flags this
     scenario, rather than exercising the broken behaviour (letting
     ``standby()`` really close the shared driver and break the other VI).
     """
-    from cryosoft.core.station import _exclusive_aliases
+    from i2as.core.station import _exclusive_aliases
 
     driver = _DetachableDriver("SIM::TEST")
     detaching_vi = _DetachWhenIdleNoOverrideVI({"main": driver})
@@ -304,7 +304,7 @@ def test_disconnect_closes_an_exclusively_owned_driver(station: Station):
 
     station.disconnect_instrument("dc_measurement")
 
-    with pytest.raises(CryoSoftCommunicationError):
+    with pytest.raises(I2ASCommunicationError):
         driver.get_idn()
 
 
@@ -608,7 +608,7 @@ class _MuteDriver:
         self.closed = False
 
     def get_idn(self) -> str:
-        raise CryoSoftCommunicationError("no response to the identity query")
+        raise I2ASCommunicationError("no response to the identity query")
 
     def close(self) -> None:
         self.closed = True
@@ -634,7 +634,7 @@ class _DetachableDriver:
 
     def get_idn(self) -> str:
         if self._closed:
-            raise CryoSoftCommunicationError("closed")
+            raise I2ASCommunicationError("closed")
         return "TEST,DETACHABLE,0,0"
 
     def close(self) -> None:

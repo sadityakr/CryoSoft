@@ -11,7 +11,7 @@ exercises together.
 
 Every engine-level test builds its own ``Orchestrator`` directly (as
 ``test_l3_orchestrator.py`` does), so it runs identically regardless of
-``CRYOSOFT_INSTRUMENT_THREAD`` — that flag only matters to the one test in
+``I2AS_INSTRUMENT_THREAD`` — that flag only matters to the one test in
 the "threaded only" section, which is skipped under inline mode.
 """
 
@@ -24,25 +24,25 @@ from typing import Any
 import h5py
 import pytest
 
-from cryosoft.core import events as ev
-from cryosoft.core.data_manager import DataManager
-from cryosoft.core.gates import Gate
-from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
-from cryosoft.core.plan import PhasePlan, StepPlan, Target
-from cryosoft.core.station import build_station
-from cryosoft.core.status_mirror import StatusMirror
-from cryosoft.session.agent_feed import (
+from i2as.core import events as ev
+from i2as.core.data_manager import DataManager
+from i2as.core.gates import Gate
+from i2as.core.orchestrator import Orchestrator, OrchestratorState
+from i2as.core.plan import PhasePlan, StepPlan, Target
+from i2as.core.station import build_station
+from i2as.core.status_mirror import StatusMirror
+from i2as.session.agent_feed import (
     RECORD_COMMAND,
     RECORD_EVENT,
     RECORD_VERDICT,
     AgentFeed,
     read_feed,
 )
-from cryosoft.session.gateway import Gateway, Role
+from i2as.session.gateway import Gateway, Role
 
 from tests.instrument_modes import build_host, instrument_mode, shutdown_host
 
-CONFIG_PATH = "cryosoft/configs/sim_cryostat"
+CONFIG_PATH = "i2as/configs/sim_cryostat"
 
 AGENT = ev.Actor(kind=ev.ActorKind.AGENT, id="scenario-s2-agent", role="session")
 

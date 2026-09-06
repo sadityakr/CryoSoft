@@ -2,7 +2,7 @@
 
 Written when triage cannot conclude. Save to
 `incidents/YYYY-MM-DD-<short-slug>.md` under the resolved log directory
-(`cryosoft.core.paths.log_directory()`). A complete report is a
+(`i2as.core.paths.log_directory()`). A complete report is a
 successful outcome: it lets a stronger model or a human expert start where you
 stopped instead of repeating your work.
 

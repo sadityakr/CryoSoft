@@ -19,9 +19,9 @@ import h5py
 import numpy as np
 import pytest
 
-from cryosoft.core import data_reader as dr
-from cryosoft.core.data_manager import DataManager
-from cryosoft.core.exceptions import DataSchemaError
+from i2as.core import data_reader as dr
+from i2as.core.data_manager import DataManager
+from i2as.core.exceptions import DataSchemaError
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
 # One reading-loop slot with two values, so every measurement column carries a
@@ -165,11 +165,11 @@ def test_open_run_missing_file(tmp_path):
 
 
 def test_open_run_rejects_a_foreign_hdf5_file(tmp_path):
-    """An HDF5 file without /data and /metadata is not a CryoSoft run."""
+    """An HDF5 file without /data and /metadata is not a I2AS run."""
     path = tmp_path / "foreign.h5"
     with h5py.File(path, "w") as file:
         file.create_dataset("something", data=np.arange(3))
-    with pytest.raises(DataSchemaError, match="not a CryoSoft run file"):
+    with pytest.raises(DataSchemaError, match="not a I2AS run file"):
         dr.open_run(path)
 
 
@@ -583,9 +583,9 @@ def test_data_reader_imports_only_events_and_exceptions():
             imported.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module:
             imported.add(node.module)
-    assert {name for name in imported if name.startswith("cryosoft")} <= {
-        "cryosoft.core.events",
-        "cryosoft.core.exceptions",
+    assert {name for name in imported if name.startswith("i2as")} <= {
+        "i2as.core.events",
+        "i2as.core.exceptions",
     }
 
 

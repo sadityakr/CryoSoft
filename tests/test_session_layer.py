@@ -4,13 +4,13 @@ import shutil
 import h5py
 import pytest
 
-from cryosoft.core import events as ev
-from cryosoft.core.orchestrator import Orchestrator
-from cryosoft.core.plan import EnvelopeBound, ExperimentEnvelope, params_digest
-from cryosoft.core.station import build_station
-from cryosoft.procedures.field_sweep import FieldSweep
-from cryosoft.session.manager import ExperimentManager
-from cryosoft.session.models import (
+from i2as.core import events as ev
+from i2as.core.orchestrator import Orchestrator
+from i2as.core.plan import EnvelopeBound, ExperimentEnvelope, params_digest
+from i2as.core.station import build_station
+from i2as.procedures.field_sweep import FieldSweep
+from i2as.session.manager import ExperimentManager
+from i2as.session.models import (
     EXPERIMENT_STATUS_CLOSED,
     EXPERIMENT_STATUS_OPEN,
     RUN_STATUS_DONE,
@@ -26,14 +26,14 @@ from cryosoft.session.models import (
     envelope_from_dict,
     envelope_to_dict,
 )
-from cryosoft.session.store import (
+from i2as.session.store import (
     ExperimentStore,
     SessionStore,
     UserRoster,
     _write_json_atomic,
 )
 
-CONFIG_PATH = "cryosoft/configs/sim_cryostat"
+CONFIG_PATH = "i2as/configs/sim_cryostat"
 
 SAMPLE_INFO = {"sample_name": "Hall bar A3", "sample_id": "A3", "comments": "test"}
 
@@ -72,7 +72,7 @@ def test_the_manager_wires_to_the_proxy_the_application_hands_it(
     exercised at launch — where a mismatch is a crash before the first window
     appears rather than a red test.
     """
-    from cryosoft.core.instrument_host import InstrumentHost
+    from i2as.core.instrument_host import InstrumentHost
 
     host = InstrumentHost(
         lambda: station, orchestrator_options={"tick_interval_ms": 50}

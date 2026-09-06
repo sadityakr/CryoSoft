@@ -9,9 +9,9 @@ Goal: a new instrument goes from "vendor library" to "selectable in a
 procedure, with a working reading loop, verified against real hardware" with
 minimal new code and zero changes to the core (CLAUDE.md's "standards over
 one-off code" principle). This skill is the measurement-method-specific
-walkthrough of that standard; `cryosoft/virtual_instruments/measurement/README.md`
+walkthrough of that standard; `i2as/virtual_instruments/measurement/README.md`
 and `MeasurementInstrumentBase`'s own docstring in
-`cryosoft/virtual_instruments/base.py` are the enforced, canonical text —
+`i2as/virtual_instruments/base.py` are the enforced, canonical text —
 this skill exists to connect that contract to the GUI-visible behavior it
 produces, which the docstrings don't show.
 
@@ -19,14 +19,14 @@ Copy `references/measurement_vi_template.py` as your starting point — it has
 every section below stubbed out with `TODO`s in place.
 
 Reference implementations to read alongside this skill:
-- `cryosoft/virtual_instruments/measurement/dc_separate_measurement.py`
+- `i2as/virtual_instruments/measurement/dc_separate_measurement.py`
   (`DCSeparateMeasurementVI`) — simplest two-driver case, with a working
   `reading_setters` example.
-- `cryosoft/virtual_instruments/measurement/camera.py` (`CameraMeasurementVI`)
+- `i2as/virtual_instruments/measurement/camera.py` (`CameraMeasurementVI`)
   — single-driver case whose reading is a frame: the shipped example of an
   **image block** (§2a below), of a `read`-class bench hook (`read_now`) and
   of scalar columns derived over a config-declared region of interest.
-- `cryosoft/virtual_instruments/temperature/lakeshore_335_sample_temperature_controller.py`
+- `i2as/virtual_instruments/temperature/lakeshore_335_sample_temperature_controller.py`
   — not a measurement VI, but the canonical example of **dynamic** control
   choices (`control_param_specs()`) under the purity rule.
 
@@ -97,7 +97,7 @@ it beside the scalar columns rather than forcing it through the
 mean/error/array convention:
 
 ```python
-from cryosoft.core.plan import ImageBlock
+from i2as.core.plan import ImageBlock
 
 measurement_image_blocks: ClassVar[dict[str, ImageBlock]] = {
     "frame": ImageBlock(height_px=128, width_px=128, unit="counts",
@@ -190,7 +190,7 @@ of your own.
 
 ## 4. GUI surface: monitor card vs. instrument front panel
 
-Both are driven by the SAME decorator metadata (`cryosoft/gui/instrument_panel.py`)
+Both are driven by the SAME decorator metadata (`i2as/gui/instrument_panel.py`)
 — the difference is which controls are shown, not how they render:
 
 - **`@monitored`** methods (no arguments) become live-value rows, polled every
@@ -277,13 +277,13 @@ parameter took part in the loop (no shipped VI declares one).
 ```yaml
 real_drivers:
   my_instrument:
-    class: cryosoft.drivers.my_instrument.MyInstrument
+    class: i2as.drivers.my_instrument.MyInstrument
     address: "GPIB0::7::INSTR"     # or host:port, etc. — match the driver's own convention
     expect_idn: "..."              # only after step 8 below has shown the REAL string; never invent one
 
 virtual_instruments:
   my_measurement:
-    class: cryosoft.virtual_instruments.measurement.my_instrument_measurement.MyInstrumentMeasurementVI
+    class: i2as.virtual_instruments.measurement.my_instrument_measurement.MyInstrumentMeasurementVI
     drivers: {main: my_instrument}   # role name -> driver alias; see the role-collision note below
     vi_type: measurement
     init_params: {...}

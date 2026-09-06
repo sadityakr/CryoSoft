@@ -3,7 +3,7 @@
 One pair of tests per instrument that has a real driver:
 
 * the **real driver** is given a transport whose replies say "I refused
-  that", and must raise ``CryoSoftInstrumentError`` carrying the
+  that", and must raise ``I2ASInstrumentError`` carrying the
   instrument's own code; and
 * the **sim twin** is driven through the wrong command sequence and must
   raise the same typed error with the same code, so the mistake fails here
@@ -22,7 +22,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from cryosoft.core.exceptions import CryoSoftInstrumentError
+from i2as.core.exceptions import I2ASInstrumentError
 
 # ── Keithley 6221 — SCPI error queue ──────────────────────────────────────────
 
@@ -53,14 +53,14 @@ def test_sim_keithley_6221_refuses_output_switch_while_delta_is_armed():
     ``:SOUR:SWE:ABOR`` *before* ``OUTP OFF`` — so a caller that skips the
     abort is exactly what this refusal exists to catch.
     """
-    from cryosoft.drivers.sim_keithley_2182a import SimKeithley2182A
-    from cryosoft.drivers.sim_keithley_6221 import SimKeithley6221
+    from i2as.drivers.sim_keithley_2182a import SimKeithley2182A
+    from i2as.drivers.sim_keithley_6221 import SimKeithley6221
 
     source = SimKeithley6221("SIM")
     source._paired_meter = SimKeithley2182A("SIM")
     source.configure_and_start_delta(high_current=1e-6, n_readings=5, delay=0.01)
 
-    with pytest.raises(CryoSoftInstrumentError) as excinfo:
+    with pytest.raises(I2ASInstrumentError) as excinfo:
         source.set_source_enabled(False)
     assert excinfo.value.code == "-221"
     assert excinfo.value.instrument_message == "Settings conflict"
@@ -84,8 +84,8 @@ def test_sim_keithley_6221_reproduces_the_221_leftover_range_rejection():
     ``set_current()`` is the *fix*: it re-asserts autorange first and is
     therefore immune, which is precisely what the next test pins.
     """
-    from cryosoft.drivers.sim_keithley_2182a import SimKeithley2182A
-    from cryosoft.drivers.sim_keithley_6221 import SimKeithley6221
+    from i2as.drivers.sim_keithley_2182a import SimKeithley2182A
+    from i2as.drivers.sim_keithley_6221 import SimKeithley6221
 
     source = SimKeithley6221("SIM")
     source._paired_meter = SimKeithley2182A("SIM")
@@ -93,7 +93,7 @@ def test_sim_keithley_6221_reproduces_the_221_leftover_range_rejection():
     source.stop_delta_mode()
     assert source._autorange is False
 
-    with pytest.raises(CryoSoftInstrumentError) as excinfo:
+    with pytest.raises(I2ASInstrumentError) as excinfo:
         source._apply_current("set_current(0.0001)", 1e-4)
     assert excinfo.value.code == "-221"
     assert source.get_current() == 0.0  # the source did NOT take the value
@@ -101,8 +101,8 @@ def test_sim_keithley_6221_reproduces_the_221_leftover_range_rejection():
 
 def test_sim_keithley_6221_set_current_recovers_from_the_leftover_range():
     """The fix: ``set_current()`` re-asserts autorange, so -221 cannot recur."""
-    from cryosoft.drivers.sim_keithley_2182a import SimKeithley2182A
-    from cryosoft.drivers.sim_keithley_6221 import SimKeithley6221
+    from i2as.drivers.sim_keithley_2182a import SimKeithley2182A
+    from i2as.drivers.sim_keithley_6221 import SimKeithley6221
 
     source = SimKeithley6221("SIM")
     source._paired_meter = SimKeithley2182A("SIM")
@@ -118,12 +118,12 @@ def test_sim_keithley_6221_set_current_recovers_from_the_leftover_range():
 
 def test_keithley_2182a_real_raises_typed_error_from_the_scpi_queue():
     """A refused range change must not be mistaken for a range change."""
-    from cryosoft.drivers.keithley_2182a import Keithley2182A
+    from i2as.drivers.keithley_2182a import Keithley2182A
 
     driver = _fake_visa_driver(
         Keithley2182A, ['-222,"Parameter data out of range"']
     )
-    with pytest.raises(CryoSoftInstrumentError) as excinfo:
+    with pytest.raises(I2ASInstrumentError) as excinfo:
         driver.set_range(1000.0)
     assert excinfo.value.code == "-222"
     assert excinfo.value.instrument_message == "Parameter data out of range"
@@ -131,11 +131,11 @@ def test_keithley_2182a_real_raises_typed_error_from_the_scpi_queue():
 
 def test_sim_keithley_2182a_refuses_a_range_above_the_channel_maximum():
     """The wrong sequence: ask for a range the channel does not have."""
-    from cryosoft.drivers.sim_keithley_2182a import SimKeithley2182A
+    from i2as.drivers.sim_keithley_2182a import SimKeithley2182A
 
     meter = SimKeithley2182A("SIM")
     before = meter.get_range()
-    with pytest.raises(CryoSoftInstrumentError) as excinfo:
+    with pytest.raises(I2ASInstrumentError) as excinfo:
         meter.set_range(1000.0)
     assert excinfo.value.code == "-222"
     assert meter.get_range() == before  # the range did NOT change
@@ -146,10 +146,10 @@ def test_sim_keithley_2182a_refuses_a_range_above_the_channel_maximum():
 
 def test_lakeshore_335_real_raises_typed_error_from_the_event_status_register():
     """An execution-error bit in ``*ESR?`` becomes the typed error."""
-    from cryosoft.drivers.lakeshore_335 import Lakeshore335
+    from i2as.drivers.lakeshore_335 import Lakeshore335
 
     driver = _fake_visa_driver(Lakeshore335, ["16"])  # bit 4 = execution error
-    with pytest.raises(CryoSoftInstrumentError) as excinfo:
+    with pytest.raises(I2ASInstrumentError) as excinfo:
         driver.set_heater_range("HIGH")
     assert excinfo.value.code == "ESR:0x10"
     assert "Execution error" in excinfo.value.instrument_message
@@ -157,7 +157,7 @@ def test_lakeshore_335_real_raises_typed_error_from_the_event_status_register():
 
 def test_lakeshore_335_real_clean_event_status_raises_nothing():
     """A zero register is the only reading that means the command landed."""
-    from cryosoft.drivers.lakeshore_335 import Lakeshore335
+    from i2as.drivers.lakeshore_335 import Lakeshore335
 
     driver = _fake_visa_driver(Lakeshore335, ["0"])
     driver.set_heater_range("OFF")
@@ -165,11 +165,11 @@ def test_lakeshore_335_real_clean_event_status_raises_nothing():
 
 def test_sim_lakeshore_335_refuses_an_empty_user_curve_slot():
     """The wrong sequence: assign a USER curve slot that holds no curve."""
-    from cryosoft.drivers.sim_lakeshore_335 import SimLakeshore335
+    from i2as.drivers.sim_lakeshore_335 import SimLakeshore335
 
     controller = SimLakeshore335("SIM")
     before = controller.get_sensor_curve("A")
-    with pytest.raises(CryoSoftInstrumentError) as excinfo:
+    with pytest.raises(I2ASInstrumentError) as excinfo:
         controller.set_sensor_curve(45, "A")
     assert excinfo.value.code == "ESR:0x10"
     assert controller.get_sensor_curve("A") == before  # assignment did NOT happen
@@ -180,13 +180,13 @@ def test_sim_lakeshore_335_refuses_an_empty_user_curve_slot():
 
 def test_sim_oxford_ips120_refuses_a_ramp_rate_while_clamped():
     """The wrong sequence: program a clamped PSU without clearing the clamp."""
-    from cryosoft.drivers.sim_oxford_ips120 import SimOxfordIPS120
+    from i2as.drivers.sim_oxford_ips120 import SimOxfordIPS120
 
     psu = SimOxfordIPS120("SIM")
     psu.set_ramp_rate(0.5)
     psu._simulate_clamp = True
 
-    with pytest.raises(CryoSoftInstrumentError) as excinfo:
+    with pytest.raises(I2ASInstrumentError) as excinfo:
         psu.set_ramp_rate(1.0)
     assert excinfo.value.code == "DENIED"
     assert psu.get_ramp_rate() == pytest.approx(0.5)  # unchanged

@@ -1,10 +1,10 @@
 # ---
 # description: |
-#   Tests for the MCP adapter (cryosoft/mcp/): the pure translation from the
+#   Tests for the MCP adapter (i2as/mcp/): the pure translation from the
 #   Gateway server's wire into MCP payloads, the adapter's dispatch against a
 #   small in-repo JSON-RPC fake, the import allowlist that keeps the adapter
 #   process unable to reach an instrument, and the stdio framing itself —
-#   driven by running `python -m cryosoft.mcp` as a real subprocess against a
+#   driven by running `python -m i2as.mcp` as a real subprocess against a
 #   real GatewayServer over a real socket.
 # last_updated: 2026-09-03
 # ---
@@ -20,25 +20,25 @@ from pathlib import Path
 
 import pytest
 
-from cryosoft.core.orchestrator import Orchestrator
-from cryosoft.core.station import build_station
-from cryosoft.mcp import translate
-from cryosoft.mcp.adapter import (
+from i2as.core.orchestrator import Orchestrator
+from i2as.core.station import build_station
+from i2as.mcp import translate
+from i2as.mcp.adapter import (
     INTERNAL_ERROR,
     INVALID_PARAMS,
     METHOD_NOT_FOUND,
     RESOURCE_NOT_FOUND,
     McpAdapter,
 )
-from cryosoft.mcp.client import GatewayError, default_descriptor_path, read_descriptor
-from cryosoft.mcp.sdk import sdk_unavailable_reason, serve_with_sdk
-from cryosoft.procedures.field_sweep import FieldSweep
-from cryosoft.session.gateway import GatewayServer, Role, ToolContext
-from cryosoft.session.manager import ExperimentManager
-from cryosoft.session.models import User
-from cryosoft.session.store import ExperimentStore, UserRoster
+from i2as.mcp.client import GatewayError, default_descriptor_path, read_descriptor
+from i2as.mcp.sdk import sdk_unavailable_reason, serve_with_sdk
+from i2as.procedures.field_sweep import FieldSweep
+from i2as.session.gateway import GatewayServer, Role, ToolContext
+from i2as.session.manager import ExperimentManager
+from i2as.session.models import User
+from i2as.session.store import ExperimentStore, UserRoster
 
-CONFIG_PATH = "cryosoft/configs/sim_cryostat"
+CONFIG_PATH = "i2as/configs/sim_cryostat"
 
 
 # ── the descriptor's default location tracks core.paths ───────────────────────
@@ -49,23 +49,23 @@ CONFIG_PATH = "cryosoft/configs/sim_cryostat"
     [
         {},
         {"XDG_STATE_HOME": "xdg-state"},
-        {"CRYOSOFT_LOG_DIR": "explicit-logs"},
+        {"I2AS_LOG_DIR": "explicit-logs"},
     ],
-    ids=["home-default", "xdg-state-home", "cryosoft-log-dir"],
+    ids=["home-default", "xdg-state-home", "i2as-log-dir"],
 )
 def test_default_descriptor_path_matches_the_log_directory_rule(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, env: dict[str, str]
 ) -> None:
     """The adapter's copy of the per-user state rule stays in step with core.paths.
 
-    Contract C21 keeps ``cryosoft.mcp.client`` from importing ``paths.py``,
+    Contract C21 keeps ``i2as.mcp.client`` from importing ``paths.py``,
     so it carries a copy of ``user_state_dir()``; this pins the copy to the
     original for every branch a POSIX host can take (the Windows branch is
     the same three lines in both, read side by side).
     """
-    from cryosoft.core import paths
+    from i2as.core import paths
 
-    for name in ("CRYOSOFT_GATEWAY_DESCRIPTOR", "CRYOSOFT_LOG_DIR", "XDG_STATE_HOME"):
+    for name in ("I2AS_GATEWAY_DESCRIPTOR", "I2AS_LOG_DIR", "XDG_STATE_HOME"):
         monkeypatch.delenv(name, raising=False)
     for name, value in env.items():
         monkeypatch.setenv(name, str(tmp_path / value))
@@ -341,10 +341,10 @@ def test_an_unknown_uri_is_a_resource_not_found():
     """A URI this server does not serve names the ones it does."""
     adapter, _ = _adapter()
 
-    response = adapter.handle(_request("resources/read", {"uri": "cryosoft://nope"}))
+    response = adapter.handle(_request("resources/read", {"uri": "i2as://nope"}))
 
     assert response["error"]["code"] == RESOURCE_NOT_FOUND
-    assert "cryosoft://status" in response["error"]["message"]
+    assert "i2as://status" in response["error"]["message"]
 
 
 def test_an_unknown_method_is_a_method_not_found():
@@ -391,15 +391,15 @@ def test_initialize_and_discover_both_answer_the_same_server():
 # ══════════════════════════════════════════════════════════════════════════
 
 
-def test_the_adapter_imports_only_the_contract_from_cryosoft():
+def test_the_adapter_imports_only_the_contract_from_i2as():
     """Import contract C21, read off the modules themselves.
 
     The contract in ``pyproject.toml`` enumerates the forbidden modules,
-    which a module added to ``cryosoft/core/`` later would not be in. This
+    which a module added to ``i2as/core/`` later would not be in. This
     reads the adapter's own imports instead, so the allowlist cannot be
     outgrown.
     """
-    allowed = {"cryosoft.core.events", "cryosoft.mcp"}
+    allowed = {"i2as.core.events", "i2as.mcp"}
     offenders: list[str] = []
     for path in sorted(Path(translate.__file__).parent.glob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -410,7 +410,7 @@ def test_the_adapter_imports_only_the_contract_from_cryosoft():
             elif isinstance(node, ast.ImportFrom) and node.module:
                 names = [node.module]
             for name in names:
-                if not name.startswith("cryosoft"):
+                if not name.startswith("i2as"):
                     continue
                 if any(name == one or name.startswith(one + ".") for one in allowed):
                     continue
@@ -418,7 +418,7 @@ def test_the_adapter_imports_only_the_contract_from_cryosoft():
 
     assert not offenders, (
         "the MCP adapter runs in a process that must not be able to reach an "
-        "instrument; it may import only cryosoft.core.events. Offending "
+        "instrument; it may import only i2as.core.events. Offending "
         f"imports: {offenders}"
     )
 
@@ -477,7 +477,7 @@ def test_a_descriptor_from_a_different_wire_is_refused(tmp_path):
 
 
 class AdapterProcess:
-    """``python -m cryosoft.mcp`` running for real, driven over its stdio.
+    """``python -m i2as.mcp`` running for real, driven over its stdio.
 
     Deliberately a subprocess and not an in-process call: the point of this
     adapter is that it is a SEPARATE process which cannot reach an
@@ -502,7 +502,7 @@ class AdapterProcess:
             [
                 sys.executable,
                 "-m",
-                "cryosoft.mcp",
+                "i2as.mcp",
                 "--descriptor",
                 str(descriptor),
                 "--role",
@@ -667,7 +667,7 @@ def test_the_adapter_answers_an_initialize_over_real_pipes(
     )
 
     assert response["result"]["protocolVersion"] == "2025-06-18"
-    assert response["result"]["serverInfo"]["name"] == "cryosoft"
+    assert response["result"]["serverInfo"]["name"] == "i2as"
     assert "kill switch" in response["result"]["instructions"]
 
 
@@ -718,7 +718,7 @@ def test_a_refused_call_comes_back_as_a_readable_result(qtbot, app, adapter_proc
 
 
 def test_a_resource_read_over_stdio_returns_the_station(qtbot, app, adapter_process):
-    """``cryosoft://station`` is the declaration the app is running."""
+    """``i2as://station`` is the declaration the app is running."""
     _, orchestrator, _ = app
 
     response = adapter_process.request(
@@ -748,7 +748,7 @@ def test_the_apps_events_arrive_as_mcp_notifications(qtbot, app, adapter_process
         for message in adapter_process.messages
         if message.get("method") == "notifications/message"
     )
-    assert notification["params"]["logger"] == "cryosoft.gateway"
+    assert notification["params"]["logger"] == "i2as.gateway"
     assert "event" in notification["params"]["data"]
 
 
@@ -776,7 +776,7 @@ def test_a_malformed_frame_on_stdin_is_a_parse_error(qtbot, app, adapter_process
 def test_the_adapter_refuses_to_start_without_a_running_app(tmp_path):
     """No app, no session: it exits non-zero and says why."""
     completed = subprocess.run(  # noqa: S603 — our own interpreter
-        [sys.executable, "-m", "cryosoft.mcp", "--descriptor", str(tmp_path / "gone.json")],
+        [sys.executable, "-m", "i2as.mcp", "--descriptor", str(tmp_path / "gone.json")],
         cwd=str(REPO_ROOT),
         env={"PYTHONPATH": str(REPO_ROOT), "PATH": "/usr/bin:/bin"},
         capture_output=True,

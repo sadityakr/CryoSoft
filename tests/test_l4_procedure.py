@@ -12,9 +12,9 @@ import h5py
 import numpy as np
 import pytest
 
-from cryosoft.core import data_reader as dr
-from cryosoft.core.decorators import control
-from cryosoft.core.plan import (
+from i2as.core import data_reader as dr
+from i2as.core.decorators import control
+from i2as.core.plan import (
     Command,
     ImageBlock,
     ParamGroup,
@@ -23,13 +23,13 @@ from cryosoft.core.plan import (
     StepPlan,
     Target,
 )
-from cryosoft.core.procedure import BaseProcedure
-from cryosoft.core.station import Station, build_station
-from cryosoft.virtual_instruments.base import MeasurementInstrumentBase
-from cryosoft.core.sweep_builder import SweepAxis, SweepSegment
-from cryosoft.procedures.field_sweep import FieldSweep
+from i2as.core.procedure import BaseProcedure
+from i2as.core.station import Station, build_station
+from i2as.virtual_instruments.base import MeasurementInstrumentBase
+from i2as.core.sweep_builder import SweepAxis, SweepSegment
+from i2as.procedures.field_sweep import FieldSweep
 
-CONFIG_PATH = "cryosoft/configs/sim_cryostat"
+CONFIG_PATH = "i2as/configs/sim_cryostat"
 
 SAMPLE_INFO = {
     "sample_name": "Test Sample",
@@ -508,7 +508,7 @@ def test_standby_double_call_safe(procedure, tmp_path):
 
 def test_full_orchestrator_loop(station, tmp_path, qtbot):
     """FieldSweep runs through a full Orchestrator cycle without errors."""
-    from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
+    from i2as.core.orchestrator import Orchestrator, OrchestratorState
 
     # Fast ramp rates so the test completes quickly
     station.magnet_z._default_ramp_rate = 6000.0
@@ -619,7 +619,7 @@ def test_experiment_info_forwarded_to_hdf5(station, tmp_path):
 
 def test_full_orchestrator_loop_emits_run_manifests(station, tmp_path, qtbot):
     """A real run emits run_started/run_finished manifests with the file path."""
-    from cryosoft.core.orchestrator import Orchestrator
+    from i2as.core.orchestrator import Orchestrator
 
     station.magnet_z._default_ramp_rate = 6000.0
     station.magnet_z._ramp_segments = []

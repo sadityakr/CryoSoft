@@ -7,8 +7,8 @@ from pathlib import Path
 import pytest
 from PyQt6.QtWidgets import QComboBox, QPushButton
 
-from cryosoft.gui.monitor_history import MonitorHistory
-from cryosoft.gui.trend_plot_panel import TIME_WINDOWS, TrendPlotPanel
+from i2as.gui.monitor_history import MonitorHistory
+from i2as.gui.trend_plot_panel import TIME_WINDOWS, TrendPlotPanel
 
 
 def _write_jsonl(path: Path, records: list[dict]) -> None:

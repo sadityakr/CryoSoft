@@ -1,9 +1,9 @@
-"""Behaviour tests for the analysis runner (cryosoft/session/analysis_runner.py).
+"""Behaviour tests for the analysis runner (i2as/session/analysis_runner.py).
 
 The runner is exercised against a STAND-IN worker: a tiny executable script
 written into ``tmp_path`` that reads the spec the runner wrote and produces
 whatever this test needs (a good report, a failed one, no report at all, or
-nothing ever). Nothing here depends on the real ``cryosoft.analysis`` worker,
+nothing ever). Nothing here depends on the real ``i2as.analysis`` worker,
 so the two halves of the analysis stage are testable independently — the same
 split the ELN track uses between an adapter and its transport.
 """
@@ -17,8 +17,8 @@ from pathlib import Path
 
 import pytest
 
-from cryosoft.analysis.report import REPORT_FILENAME, SPEC_FILENAME
-from cryosoft.session.eln.settings import AnalysisSettings, ElnSettings
+from i2as.analysis.report import REPORT_FILENAME, SPEC_FILENAME
+from i2as.session.eln.settings import AnalysisSettings, ElnSettings
 
 _OK_REPORT = """
 report = {
@@ -115,17 +115,17 @@ def runner_setup(tmp_path, qtbot):
     settings the runner reads, and ``make_runner(python)`` builds the runner
     against a stand-in worker.
     """
-    from cryosoft.core.orchestrator import Orchestrator
-    from cryosoft.core.station import build_station
-    from cryosoft.session.analysis_runner import AnalysisRunner
-    from cryosoft.session.manager import ExperimentManager
-    from cryosoft.session.models import User
-    from cryosoft.session.store import ExperimentStore, UserRoster
+    from i2as.core.orchestrator import Orchestrator
+    from i2as.core.station import build_station
+    from i2as.session.analysis_runner import AnalysisRunner
+    from i2as.session.manager import ExperimentManager
+    from i2as.session.models import User
+    from i2as.session.store import ExperimentStore, UserRoster
 
     store = ExperimentStore(tmp_path / "experiments")
     roster = UserRoster(tmp_path / "users.json")
     roster.add(User(user_id="jdoe", name="J. Doe"))
-    orchestrator = Orchestrator(build_station("cryosoft/configs/sim_cryostat"), tick_interval_ms=10)
+    orchestrator = Orchestrator(build_station("i2as/configs/sim_cryostat"), tick_interval_ms=10)
     manager = ExperimentManager(
         store=store, roster=roster, orchestrator=orchestrator, config_name="sim_cryostat"
     )

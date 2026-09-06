@@ -7,8 +7,8 @@ import time
 
 import pytest
 
-from cryosoft.core.conditions import Condition
-from cryosoft.core.operational_status import (
+from i2as.core.conditions import Condition
+from i2as.core.operational_status import (
     SCHEMA_VERSION,
     RunFaultCode,
     build_operational_status,

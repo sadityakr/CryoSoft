@@ -1,6 +1,6 @@
 # ---
 # description: |
-#   Tests for the Reference client (cryosoft/ctl/): the command grammar, the
+#   Tests for the Reference client (i2as/ctl/): the command grammar, the
 #   JSON answer shape and the three exit codes, in both modes — an --offline
 #   client over a real simulated station, and a live client writing into a
 #   Request spool that a test-ticked engine drains.
@@ -13,17 +13,17 @@ import json
 
 import pytest
 
-from cryosoft.core.orchestrator import Orchestrator
-from cryosoft.core.request_spool import RequestSpool
-from cryosoft.core.station import build_station
-from cryosoft.ctl.cli import EXIT_OK, EXIT_REFUSED, EXIT_UNREACHABLE, build_parser, main
-from cryosoft.ctl.client import CtlUnreachable, default_actor_id, open_client
-from cryosoft.ctl.discovery import discover_run_catalog
-from cryosoft.session.gateway import Role, authorize_spooled
-from cryosoft.session.models import GUEST_USER_ID
-from cryosoft.session.store import SessionStore
+from i2as.core.orchestrator import Orchestrator
+from i2as.core.request_spool import RequestSpool
+from i2as.core.station import build_station
+from i2as.ctl.cli import EXIT_OK, EXIT_REFUSED, EXIT_UNREACHABLE, build_parser, main
+from i2as.ctl.client import CtlUnreachable, default_actor_id, open_client
+from i2as.ctl.discovery import discover_run_catalog
+from i2as.session.gateway import Role, authorize_spooled
+from i2as.session.models import GUEST_USER_ID
+from i2as.session.store import SessionStore
 
-CONFIG_PATH = "cryosoft/configs/sim_cryostat"
+CONFIG_PATH = "i2as/configs/sim_cryostat"
 
 
 @pytest.fixture(autouse=True)
@@ -35,7 +35,7 @@ def quiet_logging(monkeypatch):
     turns every later log line into noise. Logging setup is not what these
     tests are about.
     """
-    monkeypatch.setattr("cryosoft.ctl.cli.setup_logging", lambda *a, **k: None)
+    monkeypatch.setattr("i2as.ctl.cli.setup_logging", lambda *a, **k: None)
 
 
 @pytest.fixture(autouse=True)
@@ -46,8 +46,8 @@ def isolated_installation(tmp_path, monkeypatch):
     store from the measurement root, both of which are real installation
     directories; a test must never write into the developer's.
     """
-    monkeypatch.setenv("CRYOSOFT_LOG_DIR", str(tmp_path / "logs"))
-    monkeypatch.setenv("CRYOSOFT_MEASUREMENT_ROOT", str(tmp_path / "data"))
+    monkeypatch.setenv("I2AS_LOG_DIR", str(tmp_path / "logs"))
+    monkeypatch.setenv("I2AS_MEASUREMENT_ROOT", str(tmp_path / "data"))
 
 
 def _run(capsys, argv, **kwargs):

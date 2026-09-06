@@ -3,8 +3,8 @@
 Copy into the config directory as `setup.md`. This file is the per-setup
 ground truth agents read before touching anything. Keep it current: every
 diagnosed quirk gets a dated entry; stale information here misleads every
-future diagnosis. The shipped `cryosoft/configs/sim_cryostat/setup.md` and
-`cryosoft/configs/sim_imaging/setup.md` are two filled-in examples.
+future diagnosis. The shipped `i2as/configs/sim_cryostat/setup.md` and
+`i2as/configs/sim_imaging/setup.md` are two filled-in examples.
 
 ```markdown
 # Setup: <station name>  <!-- confirmed by <name> on YYYY-MM-DD -->

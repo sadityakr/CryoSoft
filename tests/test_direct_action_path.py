@@ -31,21 +31,21 @@ import logging
 
 import pytest
 
-from cryosoft.core.exceptions import (
-    CryoSoftActionScopeError,
-    CryoSoftPrivateActionError,
-    CryoSoftSafetyError,
-    CryoSoftUndeclaredActionError,
+from i2as.core.exceptions import (
+    I2ASActionScopeError,
+    I2ASPrivateActionError,
+    I2ASSafetyError,
+    I2ASUndeclaredActionError,
 )
-from cryosoft.core.orchestrator import (
+from i2as.core.orchestrator import (
     MANUAL_ACTION_SCOPE,
     Orchestrator,
     OrchestratorState,
 )
-from cryosoft.core.decorators import control
-from cryosoft.core.plan import EnvelopeBound, ExperimentEnvelope
-from cryosoft.core.station import build_station
-from cryosoft.virtual_instruments.base import BaseVirtualInstrument
+from i2as.core.decorators import control
+from i2as.core.plan import EnvelopeBound, ExperimentEnvelope
+from i2as.core.station import build_station
+from i2as.virtual_instruments.base import BaseVirtualInstrument
 
 
 class _HousekeepingVI(BaseVirtualInstrument):
@@ -75,7 +75,7 @@ class _HousekeepingVI(BaseVirtualInstrument):
 @pytest.fixture
 def station():
     """A real simulated station (sim_cryostat), plus one operation-scope VI."""
-    built = build_station("cryosoft/configs/sim_cryostat")
+    built = build_station("i2as/configs/sim_cryostat")
     built.register_vi("housekeeping", _HousekeepingVI({}), "system")
     return built
 
@@ -93,7 +93,7 @@ def orchestrator(station, qtbot):
 
 def test_refuses_private_name(station):
     """An underscore-prefixed name is never a capability."""
-    with pytest.raises(CryoSoftPrivateActionError) as exc:
+    with pytest.raises(I2ASPrivateActionError) as exc:
         station.execute_vi_action("magnet_z", "_ramp_generator")
     assert "private name" in str(exc.value)
 
@@ -106,7 +106,7 @@ def test_refuses_non_control_method(station):
     dispatching it directly would have walked straight past the field limit
     ``set_field``'s ``control_limits`` wrapper enforces.
     """
-    with pytest.raises(CryoSoftUndeclaredActionError) as exc:
+    with pytest.raises(I2ASUndeclaredActionError) as exc:
         station.execute_vi_action("magnet_z", "start_ramp", target=99.0)
     assert "not a declared capability" in str(exc.value)
     assert station.magnet_z.ramp_status() == "IDLE"
@@ -114,14 +114,14 @@ def test_refuses_non_control_method(station):
 
 def test_refuses_out_of_scope_capability(station):
     """An operation-scope capability is refused for a measurement-scope caller."""
-    with pytest.raises(CryoSoftActionScopeError) as exc:
+    with pytest.raises(I2ASActionScopeError) as exc:
         station.execute_vi_action("housekeeping", "set_housekeeping_mode", mode=1)
     assert "requires operation-scope access" in str(exc.value)
 
 
 def test_refuses_value_outside_control_limits(station):
     """A value beyond the setup's configured limit is refused before dispatch."""
-    with pytest.raises(CryoSoftSafetyError) as exc:
+    with pytest.raises(I2ASSafetyError) as exc:
         station.execute_vi_action("magnet_z", "set_field", target_T=99.0)
     assert "outside the allowed range" in str(exc.value)
 
@@ -157,7 +157,7 @@ def test_the_five_refusal_reasons_are_pairwise_distinct(station, orchestrator):
         lambda: station.execute_vi_action("housekeeping", "set_housekeeping_mode", mode=1),
         lambda: station.execute_vi_action("magnet_z", "set_field", target_T=99.0),
     ):
-        with pytest.raises(CryoSoftSafetyError) as exc:
+        with pytest.raises(I2ASSafetyError) as exc:
             call()
         reasons.append(str(exc.value))
 
@@ -315,7 +315,7 @@ def test_excitation_current_is_bounded_both_ways(
     ceiling = station.get_vi(vi_name)._limits["source_current_A"][1]
     assert ceiling == pytest.approx(0.105)
     for value in (ceiling * 2, -ceiling * 2):
-        with pytest.raises(CryoSoftSafetyError) as exc:
+        with pytest.raises(I2ASSafetyError) as exc:
             station.execute_vi_action(vi_name, method_name, **{param_name: value})
         assert "outside the allowed range" in str(exc.value)
 
@@ -325,7 +325,7 @@ def test_excitation_current_is_bounded_both_ways(
 
 def _drive_to_measuring(orchestrator, station):
     """Run a trivial sweep far enough to reach MEASURING."""
-    from cryosoft.core.plan import PhasePlan, StepPlan, Target
+    from i2as.core.plan import PhasePlan, StepPlan, Target
 
     class _Sweep:
         name = "Emergency standby probe"
@@ -387,7 +387,7 @@ def test_emergency_standby_is_permitted_in_every_state(
 
 def test_emergency_standby_logs_critical_with_the_reason(orchestrator, caplog):
     """The reason lands in a CRITICAL log record, per the logging levels."""
-    with caplog.at_level(logging.CRITICAL, logger="cryosoft.core.orchestrator"):
+    with caplog.at_level(logging.CRITICAL, logger="i2as.core.orchestrator"):
         orchestrator.emergency_standby("coolant level below the safe line")
 
     critical = [r for r in caplog.records if r.levelno == logging.CRITICAL]

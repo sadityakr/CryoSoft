@@ -8,10 +8,10 @@ from pathlib import Path
 
 import pytest
 
-from cryosoft.core.station import build_station
-from cryosoft.gui.trends_quadrant import TrendsQuadrant
+from i2as.core.station import build_station
+from i2as.gui.trends_quadrant import TrendsQuadrant
 
-CONFIG_PATH = "cryosoft/configs/sim_cryostat"
+CONFIG_PATH = "i2as/configs/sim_cryostat"
 
 
 def _write_jsonl(path: Path, records: list[dict]) -> None:
@@ -104,7 +104,7 @@ def test_corrupt_raw_file_leaves_usable_empty_history(qtbot, station, tmp_path):
 
 def test_rehydration_failure_is_caught_and_logged(qtbot, station, tmp_path, monkeypatch, caplog):
     """Any exception during rehydration is caught, logged, and never propagates."""
-    import cryosoft.gui.trends_quadrant as trends_quadrant_module
+    import i2as.gui.trends_quadrant as trends_quadrant_module
 
     def _boom(*args, **kwargs):
         raise RuntimeError("simulated rehydration failure")

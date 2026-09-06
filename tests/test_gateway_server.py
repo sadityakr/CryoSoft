@@ -17,18 +17,18 @@ import json
 import pytest
 from PyQt6.QtNetwork import QLocalSocket
 
-from cryosoft.core import events as ev
-from cryosoft.core.orchestrator import Orchestrator
-from cryosoft.core.station import build_station
-from cryosoft.procedures.field_sweep import FieldSweep
-from cryosoft.session.agent_feed import AgentFeed
-from cryosoft.session.gateway import (
+from i2as.core import events as ev
+from i2as.core.orchestrator import Orchestrator
+from i2as.core.station import build_station
+from i2as.procedures.field_sweep import FieldSweep
+from i2as.session.agent_feed import AgentFeed
+from i2as.session.gateway import (
     Gateway,
     GatewayServer,
     Role,
     ToolContext,
 )
-from cryosoft.session.gateway.local_server import (
+from i2as.session.gateway.local_server import (
     BAD_TOKEN,
     METHOD_NOT_FOUND,
     NOT_AUTHENTICATED,
@@ -36,11 +36,11 @@ from cryosoft.session.gateway.local_server import (
     ROLE_REFUSED,
     SCHEMA_VERSION,
 )
-from cryosoft.session.manager import ExperimentManager
-from cryosoft.session.models import User
-from cryosoft.session.store import ExperimentStore, UserRoster
+from i2as.session.manager import ExperimentManager
+from i2as.session.models import User
+from i2as.session.store import ExperimentStore, UserRoster
 
-CONFIG_PATH = "cryosoft/configs/sim_cryostat"
+CONFIG_PATH = "i2as/configs/sim_cryostat"
 
 TOKEN = "test-token-not-a-secret"
 
@@ -638,9 +638,9 @@ def test_the_app_stops_the_server_when_it_quits():
     import ast
     from pathlib import Path
 
-    import cryosoft.main
+    import i2as.main
 
-    tree = ast.parse(Path(cryosoft.main.__file__).read_text(encoding="utf-8"))
+    tree = ast.parse(Path(i2as.main.__file__).read_text(encoding="utf-8"))
     wired = [
         node
         for node in ast.walk(tree)
@@ -667,15 +667,15 @@ def test_the_app_stops_the_server_when_it_quits():
 def app_wired_server(qtbot, tmp_path):
     """The server ``main()`` builds: over the proxy, engine on its own thread.
 
-    Exercises ``cryosoft.main._build_gateway_server()`` itself rather than a
+    Exercises ``i2as.main._build_gateway_server()`` itself rather than a
     hand-assembled equivalent, because the wiring IS what is under test: the
     object handed to the server is the **Orchestrator proxy**, never the
     engine, and under the single hardware thread standard the engine is on
     the instrument thread while the server is on this one.
     """
-    from cryosoft.core.instrument_host import InstrumentHost
-    from cryosoft.core.config import read_gateway_config
-    from cryosoft.main import _build_gateway_server
+    from i2as.core.instrument_host import InstrumentHost
+    from i2as.core.config import read_gateway_config
+    from i2as.main import _build_gateway_server
 
     host = InstrumentHost(
         lambda: build_station(CONFIG_PATH),
@@ -758,8 +758,8 @@ def test_the_app_wiring_serves_a_client_with_the_engine_on_its_own_thread(
 
 def test_a_setup_that_does_not_ask_for_a_server_gets_none(tmp_path):
     """The config gate, in the wiring function: silence opens no socket."""
-    from cryosoft.core.config import read_gateway_config
-    from cryosoft.main import _build_gateway_server
+    from i2as.core.config import read_gateway_config
+    from i2as.main import _build_gateway_server
 
     (tmp_path / "monitor.yaml").write_text("monitor:\n  tick_interval_ms: 1000\n")
 

@@ -24,9 +24,9 @@ from typing import Any
 import pytest
 from PyQt6.QtWidgets import QLineEdit
 
-from cryosoft.gui.eln_settings_dialog import KEY_PLACEHOLDER, ElnSettingsDialog
-from cryosoft.session.eln.settings import AnalysisSettings, ElnSettings
-from cryosoft.session.eln.sim_eln import SimElnAdapter
+from i2as.gui.eln_settings_dialog import KEY_PLACEHOLDER, ElnSettingsDialog
+from i2as.session.eln.settings import AnalysisSettings, ElnSettings
+from i2as.session.eln.sim_eln import SimElnAdapter
 
 
 #: The real analysis block — the stand-in from the parallel build is gone.
@@ -61,7 +61,7 @@ def settings() -> SettingsWithAnalysis:
         api_key="stored-secret",
         team_id="7",
         template_id="1",
-        tags=("cryosoft", "hall"),
+        tags=("i2as", "hall"),
         max_attachment_bytes=25 * 1024 * 1024,
     )
     return replace(base, assistant=replace(base.assistant, model="claude-sonnet-5"))
@@ -92,7 +92,7 @@ def test_form_shows_the_settings_but_never_the_key(dialog, settings):
     widget, _saved = dialog
     assert widget._base_url_input.text() == settings.base_url
     assert widget._team_id_input.text() == "7"
-    assert widget._tags_input.text() == "cryosoft, hall"
+    assert widget._tags_input.text() == "i2as, hall"
     assert widget._attachment_cap_input.value() == 25
     assert widget._api_key_input.text() == ""
     assert widget._api_key_input.echoMode() == QLineEdit.EchoMode.Password

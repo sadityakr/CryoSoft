@@ -1,4 +1,4 @@
-"""Tests for cryosoft.core.trend_checks."""
+"""Tests for i2as.core.trend_checks."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from cryosoft.core.conditions import Condition
-from cryosoft.core.trend_checks import (
+from i2as.core.conditions import Condition
+from i2as.core.trend_checks import (
     CheckOutcome,
     CheckResult,
     TrendCheck,

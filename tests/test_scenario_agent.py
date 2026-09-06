@@ -3,7 +3,7 @@
 #   End-to-end scenario tests for the family "a measurement driven by an
 #   agent", run through every client surface the Agent gateway offers: the
 #   in-process Gateway (threaded, over a real InstrumentHost), role and
-#   kill-switch and attendance refusals mid-run, cryosoft.ctl offline, the
+#   kill-switch and attendance refusals mid-run, i2as.ctl offline, the
 #   Request spool, the local socket and the MCP shim over it, and two agents
 #   at once. Each surface drives the same story —
 #   read status, read manifest, validate_run, probe_run, run a FieldSweep,
@@ -25,32 +25,32 @@ from pathlib import Path
 import pytest
 from PyQt6.QtNetwork import QLocalSocket
 
-from cryosoft.core import events as ev
-from cryosoft.core.data_reader import open_run
-from cryosoft.core.instrument_host import InstrumentHost
-from cryosoft.core.orchestrator import Orchestrator
-from cryosoft.core.request_spool import RequestSpool
-from cryosoft.core.station import build_station
-from cryosoft.ctl.cli import EXIT_OK, EXIT_REFUSED, main as ctl_main
-from cryosoft.ctl.client import open_client
-from cryosoft.mcp import translate as mcp_translate
-from cryosoft.procedures.field_sweep import FieldSweep
-from cryosoft.session.agent_feed import AgentFeed, read_feed
-from cryosoft.session.gateway import (
+from i2as.core import events as ev
+from i2as.core.data_reader import open_run
+from i2as.core.instrument_host import InstrumentHost
+from i2as.core.orchestrator import Orchestrator
+from i2as.core.request_spool import RequestSpool
+from i2as.core.station import build_station
+from i2as.ctl.cli import EXIT_OK, EXIT_REFUSED, main as ctl_main
+from i2as.ctl.client import open_client
+from i2as.mcp import translate as mcp_translate
+from i2as.procedures.field_sweep import FieldSweep
+from i2as.session.agent_feed import AgentFeed, read_feed
+from i2as.session.gateway import (
     Gateway,
     GatewayServer,
     Role,
     ToolContext,
     authorize_spooled,
 )
-from cryosoft.session.gateway.gateway import event_stream, verdict_stream
-from cryosoft.session.gateway.local_server import ROLE_REFUSED
-from cryosoft.session.manager import ExperimentManager
-from cryosoft.session.models import User
-from cryosoft.session.store import ExperimentStore, UserRoster
+from i2as.session.gateway.gateway import event_stream, verdict_stream
+from i2as.session.gateway.local_server import ROLE_REFUSED
+from i2as.session.manager import ExperimentManager
+from i2as.session.models import User
+from i2as.session.store import ExperimentStore, UserRoster
 from tests.instrument_modes import shutdown_host
 
-CONFIG_PATH = "cryosoft/configs/sim_cryostat"
+CONFIG_PATH = "i2as/configs/sim_cryostat"
 
 TOKEN = "test-token-not-a-secret"  # noqa: S105 — a fixture value, not a secret
 
@@ -142,7 +142,7 @@ def threaded_stack(qtbot, tmp_path):
     """A real InstrumentHost in threaded mode — the wiring the app itself uses.
 
     The Gateway attaches to the **Orchestrator proxy**, exactly as
-    ``cryosoft.main`` wires the Gateway server, so
+    ``i2as.main`` wires the Gateway server, so
     a command tool answers ``PENDING`` until its verdict crosses back over
     the instrument thread — the asynchronous half of the client boundary a
     plain-Orchestrator fixture never exercises.
@@ -517,7 +517,7 @@ def test_attendance_flips_mid_run(experiment_engine, tmp_path):
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 5. cryosoft.ctl offline mode
+# 5. i2as.ctl offline mode
 # ══════════════════════════════════════════════════════════════════════════
 
 
@@ -529,15 +529,15 @@ def _isolated_installation_env(tmp_path, monkeypatch):
     both resolve installation directories from these variables), and is a
     no-op for scenarios that never read them.
     """
-    monkeypatch.setenv("CRYOSOFT_LOG_DIR", str(tmp_path / "logs"))
-    monkeypatch.setenv("CRYOSOFT_MEASUREMENT_ROOT", str(tmp_path / "data"))
-    monkeypatch.setattr("cryosoft.ctl.cli.setup_logging", lambda *a, **k: None)
+    monkeypatch.setenv("I2AS_LOG_DIR", str(tmp_path / "logs"))
+    monkeypatch.setenv("I2AS_MEASUREMENT_ROOT", str(tmp_path / "data"))
+    monkeypatch.setattr("i2as.ctl.cli.setup_logging", lambda *a, **k: None)
 
 
 @pytest.fixture
 def ctl_client(qtbot, monkeypatch):
     """A session-role offline client with an experiment the physicist opened."""
-    from cryosoft.ctl import client as ctl_client_module
+    from i2as.ctl import client as ctl_client_module
 
     monkeypatch.setattr(ctl_client_module, "build_station", lambda path: _fast_station(path))
     client = open_client(
@@ -565,7 +565,7 @@ def test_ctl_offline_the_full_story(capsys, ctl_client):
     """tools, status, validate_run, probe_run, a refused run as observer, a
     successful run as session, and the feed showing every request.
     """
-    from cryosoft.ctl.client import CtlClient
+    from i2as.ctl.client import CtlClient
 
     client, manager = ctl_client
     data_dir = str(manager.current_data_dir())
@@ -656,11 +656,11 @@ def test_ctl_offline_the_full_story(capsys, ctl_client):
 def test_ctl_offline_refuses_a_second_client_the_owners_run(capsys, ctl_client):
     """The **run-ownership standard** through the terminal client.
 
-    Two invocations of `cryosoft.ctl` are two actors, exactly as two agents
+    Two invocations of `i2as.ctl` are two actors, exactly as two agents
     are: the second is refused the first's run by name, reads the override
     off the published tool schema, and is then obeyed — on the record.
     """
-    from cryosoft.ctl.client import CtlClient
+    from i2as.ctl.client import CtlClient
 
     client, manager = ctl_client
     data_dir = str(manager.current_data_dir())
@@ -930,7 +930,7 @@ def test_local_socket_the_full_story_and_a_ceiling_refusal(qtbot, served):
 
 
 class _AdapterProcess:
-    """``python -m cryosoft.mcp`` running for real, over its own stdio."""
+    """``python -m i2as.mcp`` running for real, over its own stdio."""
 
     def __init__(self, descriptor: Path, *, role: str, actor_id: str) -> None:
         self.messages: list[dict] = []
@@ -939,7 +939,7 @@ class _AdapterProcess:
             [
                 sys.executable,
                 "-m",
-                "cryosoft.mcp",
+                "i2as.mcp",
                 "--descriptor",
                 str(descriptor),
                 "--role",

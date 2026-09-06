@@ -25,9 +25,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from cryosoft.core.orchestrator import Orchestrator
-from cryosoft.core.plan import PhasePlan, Target
-from cryosoft.core.station import Station
+from i2as.core.orchestrator import Orchestrator
+from i2as.core.plan import PhasePlan, Target
+from i2as.core.station import Station
 
 _DEFAULT_TIMEOUT_MS = 3000
 
@@ -189,7 +189,7 @@ def quench(
         magnet_vi: See ``apply_quench()``.
         timeout_ms: ``qtbot.waitUntil`` timeout.
     """
-    from cryosoft.core.orchestrator import OrchestratorState
+    from i2as.core.orchestrator import OrchestratorState
 
     apply_quench(station, magnet_vi=magnet_vi)
     qtbot.waitUntil(
@@ -204,7 +204,7 @@ def apply_disconnect(
 
     The same ``_simulate_error`` knob models both "the instrument dropped
     off the bus" and "a measurement instrument returned an error instead of
-    data": every sim driver raises ``CryoSoftCommunicationError`` from
+    data": every sim driver raises ``I2ASCommunicationError`` from
     every public method while it is set, regardless of the VI's role
     (system/measurement) — there is only one comm-fault primitive at
     the driver layer; what differs is which VI it's applied to.

@@ -33,13 +33,13 @@ from typing import Any
 import pytest
 from PyQt6.QtCore import QCoreApplication, QThread
 
-from cryosoft.core import events as ev
-from cryosoft.core.instrument_host import InstrumentHost
-from cryosoft.core.orchestrator import OrchestratorState
-from cryosoft.core.plan import PhasePlan, StepPlan, Target
-from cryosoft.core.station import build_station
+from i2as.core import events as ev
+from i2as.core.instrument_host import InstrumentHost
+from i2as.core.orchestrator import OrchestratorState
+from i2as.core.plan import PhasePlan, StepPlan, Target
+from i2as.core.station import build_station
 
-CONFIG_PATH = "cryosoft/configs/sim_cryostat"
+CONFIG_PATH = "i2as/configs/sim_cryostat"
 
 #: Every wait in this file is bounded, and generously: a queued hop costs one
 #: event-loop turn, so a timeout this long means the boundary is broken, not
@@ -679,7 +679,7 @@ def test_shutdown_is_bounded_when_an_instrument_read_never_returns(
     proxy.start_monitoring()
     assert wedged.wait(10.0), "the engine never reached the wedged read"
 
-    with caplog.at_level(logging.CRITICAL, logger="cryosoft.core.instrument_host"):
+    with caplog.at_level(logging.CRITICAL, logger="i2as.core.instrument_host"):
         started = time.monotonic()
         host.shutdown()
         elapsed = time.monotonic() - started
@@ -759,8 +759,8 @@ def test_the_gui_builds_and_drives_through_the_proxy_across_the_thread(
     are handed exactly what they are handed inline, and a click still reaches
     the engine — only now it arrives one event-loop hop later.
     """
-    from cryosoft.gui.monitor_window import MonitorWindow
-    from cryosoft.gui.procedure_window import ProcedureWindow
+    from i2as.gui.monitor_window import MonitorWindow
+    from i2as.gui.procedure_window import ProcedureWindow
 
     monitor = MonitorWindow(host.station, proxy, mirror=proxy.status)
     qtbot.addWidget(monitor)

@@ -12,12 +12,12 @@ import h5py
 import numpy as np
 import pytest
 
-from cryosoft.core.exceptions import CryoSoftConfigError
-from cryosoft.core.plan import PhasePlan, StepPlan
-from cryosoft.core.station import build_station
-from cryosoft.procedures.time_series import TimeSeries
+from i2as.core.exceptions import I2ASConfigError
+from i2as.core.plan import PhasePlan, StepPlan
+from i2as.core.station import build_station
+from i2as.procedures.time_series import TimeSeries
 
-CONFIG_PATH = "cryosoft/configs/sim_cryostat"
+CONFIG_PATH = "i2as/configs/sim_cryostat"
 
 SAMPLE_INFO = {
     "sample_name": "Test Sample",
@@ -88,7 +88,7 @@ def test_schedule_never_exceeds_the_maximum_duration(station, tmp_path):
 
 
 def test_non_positive_step_time_is_refused(station, tmp_path):
-    with pytest.raises(CryoSoftConfigError, match="step_time_s"):
+    with pytest.raises(I2ASConfigError, match="step_time_s"):
         _proc(station, tmp_path, step_time_s=0.0)
 
 
@@ -233,7 +233,7 @@ def test_watched_channel_without_a_vi_is_refused_at_construction(station, tmp_pa
     """A station missing the watched instrument fails now, not silently mid-run."""
     station._virtual_instruments.pop("temperature")
     station._vi_registry.pop("temperature")
-    with pytest.raises(CryoSoftConfigError, match="temperature"):
+    with pytest.raises(I2ASConfigError, match="temperature"):
         _proc(station, tmp_path, end_condition="temperature", end_value=4.0)
 
 

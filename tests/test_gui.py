@@ -5,13 +5,13 @@ config with no hardware.
 
 They run in BOTH instrument modes. The shared fixtures build the engine
 through an ``InstrumentHost`` whose mode comes from
-``CRYOSOFT_INSTRUMENT_THREAD`` (``tests/instrument_modes.py``), and the
+``I2AS_INSTRUMENT_THREAD`` (``tests/instrument_modes.py``), and the
 ``orchestrator`` fixture hands the windows an ``OrchestratorProxy`` — which is
 what ``main.py`` hands them — so the same 190-odd assertions hold with the
 engine on this thread and with it on its own:
 
     pytest tests/test_gui.py
-    CRYOSOFT_INSTRUMENT_THREAD=1 pytest tests/test_gui.py
+    I2AS_INSTRUMENT_THREAD=1 pytest tests/test_gui.py
 
 A test that reaches past the client boundary — forcing a state, setting a
 private the engine only writes inside a tick — goes through the **tick
@@ -45,31 +45,31 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from cryosoft.core.config_catalog import ConfigCatalog
-from cryosoft.core.decorators import control, monitored
-from cryosoft.core.events import ErrorEvent
-from cryosoft.core.exceptions import CryoSoftCommunicationError
-from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
-from cryosoft.core.plan import ParamSpec
-from cryosoft.core.station import build_station
-from cryosoft.gui import app_settings as _app_settings
-from cryosoft.gui import form_autosave as session_store
-from cryosoft.gui import window_geometry
-from cryosoft.gui.instrument_front_panel import InstrumentFrontPanel
-from cryosoft.gui.instrument_panel import InstrumentPanel
-from cryosoft.gui.monitor_window import MonitorWindow
-from cryosoft.gui.notification_banner import NotificationBanner
-from cryosoft.gui.procedure_window import ProcedureWindow
-from cryosoft.gui.theme import (
+from i2as.core.config_catalog import ConfigCatalog
+from i2as.core.decorators import control, monitored
+from i2as.core.events import ErrorEvent
+from i2as.core.exceptions import I2ASCommunicationError
+from i2as.core.orchestrator import Orchestrator, OrchestratorState
+from i2as.core.plan import ParamSpec
+from i2as.core.station import build_station
+from i2as.gui import app_settings as _app_settings
+from i2as.gui import form_autosave as session_store
+from i2as.gui import window_geometry
+from i2as.gui.instrument_front_panel import InstrumentFrontPanel
+from i2as.gui.instrument_panel import InstrumentPanel
+from i2as.gui.monitor_window import MonitorWindow
+from i2as.gui.notification_banner import NotificationBanner
+from i2as.gui.procedure_window import ProcedureWindow
+from i2as.gui.theme import (
     BANNER_ERROR_TEXT,
     BANNER_WARNING_TEXT,
     TEXT_ON_ACCENT,
     TEXT_PRIMARY,
     build_stylesheet,
 )
-from cryosoft.gui.trend_plot_panel import TrendPlotPanel
-from cryosoft.gui import widget_lifecycle
-from cryosoft.virtual_instruments.base import BaseVirtualInstrument
+from i2as.gui.trend_plot_panel import TrendPlotPanel
+from i2as.gui import widget_lifecycle
+from i2as.virtual_instruments.base import BaseVirtualInstrument
 from tests.instrument_modes import (
     build_host,
     engine_of,
@@ -81,7 +81,7 @@ from tests.instrument_modes import (
 )
 
 
-CONFIG_PATH = "cryosoft/configs/sim_cryostat"
+CONFIG_PATH = "i2as/configs/sim_cryostat"
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -100,9 +100,9 @@ def isolated_settings(tmp_path, monkeypatch):
         The Path of the throwaway INI file, so a test can inspect what was
         written to it.
     """
-    from cryosoft.gui import app_settings
+    from i2as.gui import app_settings
 
-    ini_path = tmp_path / "cryosoft_test_settings.ini"
+    ini_path = tmp_path / "i2as_test_settings.ini"
 
     def _fake_get_settings():
         return QSettings(str(ini_path), QSettings.Format.IniFormat)
@@ -223,8 +223,8 @@ def _mock_mirror(orchestrator, vi_name, vi):
     Returns:
         The primed StatusMirror.
     """
-    from cryosoft.core.station import Station
-    from cryosoft.core.status_mirror import StatusMirror
+    from i2as.core.station import Station
+    from i2as.core.status_mirror import StatusMirror
 
     declaring = Station()
     declaring.register_vi(vi_name, vi, "measurement")
@@ -267,7 +267,7 @@ def test_status_bar_updates_on_state_change(monitor_win, orchestrator, qtbot):
 
 def test_instrument_panel_creates_value_labels(station, orchestrator, qtbot):
     """InstrumentPanel creates one QLabel per @monitored method."""
-    from cryosoft.core.decorators import get_monitored_methods
+    from i2as.core.decorators import get_monitored_methods
 
     vi_name = "magnet_z"
     vi = station._virtual_instruments[vi_name]
@@ -282,7 +282,7 @@ def test_instrument_panel_creates_value_labels(station, orchestrator, qtbot):
 
 def test_instrument_panel_creates_control_buttons(station, orchestrator, qtbot):
     """InstrumentPanel creates one QPushButton per @control method."""
-    from cryosoft.core.decorators import get_control_methods
+    from i2as.core.decorators import get_control_methods
 
     vi_name = "magnet_z"
     vi = station._virtual_instruments[vi_name]
@@ -509,12 +509,12 @@ class _ToggleableFaultDriver:
 
     def get_idn(self) -> str:
         if type(self).broken:
-            raise CryoSoftCommunicationError("bus session is dead")
-        return "CRYOSOFT,GUI-TOGGLE-STUB,0,0"
+            raise I2ASCommunicationError("bus session is dead")
+        return "I2AS,GUI-TOGGLE-STUB,0,0"
 
     def get_reading(self) -> float:
         if type(self).broken:
-            raise CryoSoftCommunicationError("bus session is dead")
+            raise I2ASCommunicationError("bus session is dead")
         return 1.0
 
     def close(self) -> None:
@@ -1025,7 +1025,7 @@ def test_procedure_param_inputs_exist(procedure_win):
     Its measurement parameters are station-dependent (from the selected
     measurement VI), rendered under the "Measurement method" selector.
     """
-    from cryosoft.procedures.field_sweep import FieldSweep
+    from i2as.procedures.field_sweep import FieldSweep
 
     _select_procedure(procedure_win, FieldSweep.name)
 
@@ -1052,7 +1052,7 @@ def test_procedure_param_label_and_tooltip(procedure_win):
     SweepAxisWidget, not a flat QLineEdit + QFormLayout row, so they are not a
     valid target for this label/tooltip check.
     """
-    from cryosoft.procedures.field_sweep import FieldSweep
+    from i2as.procedures.field_sweep import FieldSweep
 
     _select_procedure(procedure_win, FieldSweep.name)
 
@@ -1090,7 +1090,7 @@ def test_procedure_bool_widgets_render(procedure_win):
     widget mapping, enumerated choices included, is pinned against
     ``param_form`` directly further down this file.)
     """
-    from cryosoft.procedures.field_sweep import FieldSweep
+    from i2as.procedures.field_sweep import FieldSweep
 
     _select_procedure(procedure_win, FieldSweep.name)
 
@@ -1101,7 +1101,7 @@ def test_procedure_bool_widgets_render(procedure_win):
 
 def test_procedure_bool_values_collected(procedure_win):
     """_collect_params reads each checkbox back as a real bool."""
-    from cryosoft.procedures.field_sweep import FieldSweep
+    from i2as.procedures.field_sweep import FieldSweep
 
     _select_procedure(procedure_win, FieldSweep.name)
 
@@ -1180,7 +1180,7 @@ def test_generic_field_sweep_renders_measurement_select_and_default_group(proced
     the sim config), so its parameters render inside the single composite
     "Measurement" column.
     """
-    from cryosoft.procedures.field_sweep import FieldSweep
+    from i2as.procedures.field_sweep import FieldSweep
 
     _select_procedure(procedure_win, FieldSweep.name)
 
@@ -1205,7 +1205,7 @@ def test_generic_field_sweep_all_four_columns_visible_no_hscroll(procedure_win, 
     a horizontal scrollbar. Assert the actual on-screen geometry, not just
     widget existence.
     """
-    from cryosoft.procedures.field_sweep import FieldSweep
+    from i2as.procedures.field_sweep import FieldSweep
 
     procedure_win._params_panel.select_procedure_by_name(FieldSweep.name)
     # Put the loopable parameter in slot 1 so the values input renders — the
@@ -1229,7 +1229,7 @@ def test_generic_field_sweep_all_four_columns_visible_no_hscroll(procedure_win, 
 
 def test_generic_field_sweep_collect_merges_params_for_the_selection(procedure_win):
     """_collect_params merges the selected VI's params with the procedure's own."""
-    from cryosoft.procedures.field_sweep import FieldSweep
+    from i2as.procedures.field_sweep import FieldSweep
 
     _select_procedure(procedure_win, FieldSweep.name)
 
@@ -1246,7 +1246,7 @@ def test_generic_field_sweep_method_combo_shows_selector_labels(procedure_win, s
     column wide). It now shows each VI's ``selector_label`` and carries the bare
     ``vi_name`` as a per-item tooltip; the collected value is still the vi_name.
     """
-    from cryosoft.procedures.field_sweep import FieldSweep
+    from i2as.procedures.field_sweep import FieldSweep
 
     _select_procedure(procedure_win, FieldSweep.name)
     combo = _measurement_combo(procedure_win)
@@ -1278,7 +1278,7 @@ def test_live_plot_loop_selectors_follow_reading_loop(procedure_win, station):
     enabled with one item per value — display text carrying the value, item
     data carrying the 0-based axis index — once a slot has two or more values.
     """
-    from cryosoft.procedures.field_sweep import FieldSweep
+    from i2as.procedures.field_sweep import FieldSweep
 
     procedure_win._params_panel.select_procedure_by_name(FieldSweep.name)
     sel1 = procedure_win.findChild(QComboBox, "plot1_loop1_selector")
@@ -1318,12 +1318,12 @@ def test_live_plot_loop_selectors_follow_reading_loop(procedure_win, station):
 def test_param_form_renders_all_widget_kinds_and_round_trips(qtbot):
     """param_form maps each ParamSpec kind to the right widget and round-trips values.
 
-    Exercises cryosoft.gui.param_form directly (no ProcedureWindow) on a
+    Exercises i2as.gui.param_form directly (no ProcedureWindow) on a
     synthetic ParamGroup covering the four shapes: plain float, bounded int,
     enumerated choices, and bool.
     """
-    from cryosoft.core.plan import ParamGroup, ParamSpec
-    from cryosoft.gui import param_form
+    from i2as.core.plan import ParamGroup, ParamSpec
+    from i2as.gui import param_form
 
     group = ParamGroup(
         key="demo",
@@ -1381,9 +1381,9 @@ def test_param_form_renders_all_widget_kinds_and_round_trips(qtbot):
 @pytest.fixture
 def session_manager(tmp_path, station, orchestrator):
     """ExperimentManager backed by a tmp_path store/roster, with one roster user."""
-    from cryosoft.session.manager import ExperimentManager
-    from cryosoft.session.models import User
-    from cryosoft.session.store import ExperimentStore, UserRoster
+    from i2as.session.manager import ExperimentManager
+    from i2as.session.models import User
+    from i2as.session.store import ExperimentStore, UserRoster
 
     roster = UserRoster(tmp_path / "users.json")
     roster.add(User(user_id="jdoe", name="J. Doe", email="jdoe@example.org"))
@@ -1439,7 +1439,7 @@ def _stub_start_dialog(
     monkeypatch, title, user_id, attended=True, dirname=None, envelope=None
 ):
     """Replace StartExperimentDialog with a fake that auto-accepts ``values``."""
-    from cryosoft.gui import experiment_info_panel as sip
+    from i2as.gui import experiment_info_panel as sip
 
     monkeypatch.setattr(
         sip,
@@ -1452,7 +1452,7 @@ def _stub_start_dialog(
 
 def _stub_close_dialog(monkeypatch, findings_text=""):
     """Replace CloseExperimentDialog with a fake that auto-accepts ``findings_text``."""
-    from cryosoft.gui import experiment_info_panel as sip
+    from i2as.gui import experiment_info_panel as sip
 
     monkeypatch.setattr(
         sip,
@@ -1499,7 +1499,7 @@ def test_eln_status_shows_published_url_when_eln_link_set(
     monitor_win_session, session_manager, monkeypatch
 ):
     """Once ElnLink carries a url, the panel reflects it instead of the placeholder."""
-    from cryosoft.session.models import ElnLink
+    from i2as.session.models import ElnLink
 
     _stub_start_dialog(monkeypatch, "Hall bar A3", "jdoe")
     panel = monitor_win_session._session_info
@@ -1549,7 +1549,7 @@ def test_attendance_checkbox_toggle_calls_set_attended(
 
 def test_add_user_dialog_autofills_id_from_name(qtbot):
     """AddUserDialog derives a roster-key slug from the typed name."""
-    from cryosoft.gui.experiment_dialogs import AddUserDialog
+    from i2as.gui.experiment_dialogs import AddUserDialog
 
     dialog = AddUserDialog()
     qtbot.addWidget(dialog)
@@ -1562,8 +1562,8 @@ def test_add_user_dialog_autofills_id_from_name(qtbot):
 
 
 def _start_dialog_roster(tmp_path):
-    from cryosoft.session.models import User
-    from cryosoft.session.store import UserRoster
+    from i2as.session.models import User
+    from i2as.session.store import UserRoster
 
     roster = UserRoster(tmp_path / "users.json")
     roster.add(User(user_id="jdoe", name="J. Doe"))
@@ -1572,7 +1572,7 @@ def _start_dialog_roster(tmp_path):
 
 def test_start_experiment_dialog_default_dirname_from_title(qtbot, tmp_path):
     """The folder name field auto-fills from the title until hand-edited."""
-    from cryosoft.gui.experiment_dialogs import StartExperimentDialog
+    from i2as.gui.experiment_dialogs import StartExperimentDialog
 
     dialog = StartExperimentDialog(_start_dialog_roster(tmp_path))
     qtbot.addWidget(dialog)
@@ -1588,7 +1588,7 @@ def test_start_experiment_dialog_dirname_hand_edit_stops_autofill(qtbot, tmp_pat
     """Typing directly into the folder name field stops title-driven auto-fill."""
     from PyQt6.QtTest import QTest
 
-    from cryosoft.gui.experiment_dialogs import StartExperimentDialog
+    from i2as.gui.experiment_dialogs import StartExperimentDialog
 
     dialog = StartExperimentDialog(_start_dialog_roster(tmp_path))
     qtbot.addWidget(dialog)
@@ -1606,7 +1606,7 @@ def test_start_experiment_dialog_dirname_hand_edit_stops_autofill(qtbot, tmp_pat
 
 def test_start_experiment_dialog_result_values_dirname_none_when_empty(qtbot, tmp_path):
     """An empty folder name field surfaces as None — the manager auto-derives one."""
-    from cryosoft.gui.experiment_dialogs import StartExperimentDialog
+    from i2as.gui.experiment_dialogs import StartExperimentDialog
 
     dialog = StartExperimentDialog(_start_dialog_roster(tmp_path))
     qtbot.addWidget(dialog)
@@ -1665,7 +1665,7 @@ def _envelope_variables_dict(station):
 
 def _envelope_dialog(qtbot, tmp_path, station):
     """A Start Experiment dialog carrying the sim station's envelope editor."""
-    from cryosoft.gui.experiment_dialogs import StartExperimentDialog
+    from i2as.gui.experiment_dialogs import StartExperimentDialog
 
     dialog = StartExperimentDialog(
         _start_dialog_roster(tmp_path),
@@ -1690,7 +1690,7 @@ def test_envelope_editor_is_prefilled_from_the_config_limits(qtbot, tmp_path, st
 
 def test_envelope_editor_absent_without_variables(qtbot, tmp_path):
     """A dialog built with no station (a unit test, say) carries no editor."""
-    from cryosoft.gui.experiment_dialogs import StartExperimentDialog
+    from i2as.gui.experiment_dialogs import StartExperimentDialog
 
     dialog = StartExperimentDialog(_start_dialog_roster(tmp_path))
     qtbot.addWidget(dialog)
@@ -1754,7 +1754,7 @@ def test_started_experiment_installs_the_dialog_envelope(
     monitor_win_session, session_manager, orchestrator, monkeypatch
 ):
     """The envelope the dialog returns is installed on the Orchestrator."""
-    from cryosoft.core.plan import EnvelopeBound, ExperimentEnvelope
+    from i2as.core.plan import EnvelopeBound, ExperimentEnvelope
 
     envelope = ExperimentEnvelope(
         bounds={"magnet_z": EnvelopeBound(min_value=-0.5, max_value=0.5)}
@@ -1777,7 +1777,7 @@ def test_start_dialog_is_offered_the_setups_envelope_variables(
     """The panel hands the dialog the setup's bounds, not an empty editor."""
     seen: list[dict] = []
 
-    from cryosoft.gui import experiment_info_panel as sip
+    from i2as.gui import experiment_info_panel as sip
 
     def _capture(roster, parent=None, envelope_variables=None):
         seen.append(envelope_variables)
@@ -1804,7 +1804,7 @@ def test_start_dialog_opens_with_a_populated_envelope_editor(
     Experiment dialog for every setup with an enveloped quantity. This opens
     the real dialog on the sim station, through the manager the window holds.
     """
-    from cryosoft.gui.experiment_dialogs import StartExperimentDialog
+    from i2as.gui.experiment_dialogs import StartExperimentDialog
 
     dialog = StartExperimentDialog(
         session_manager.roster,
@@ -1826,7 +1826,7 @@ def test_start_dialog_opens_with_a_populated_envelope_editor(
 
 def test_envelope_editor_shows_an_envelope_already_in_force(qtbot, tmp_path, station):
     """set_bounds() replaces the setup defaults with the stored envelope."""
-    from cryosoft.gui.experiment_dialogs import EnvelopeEditorWidget
+    from i2as.gui.experiment_dialogs import EnvelopeEditorWidget
 
     editor = EnvelopeEditorWidget(_envelope_variables_dict(station))
     qtbot.addWidget(editor)
@@ -1851,9 +1851,9 @@ def test_current_user_label_defaults_not_logged_in(monitor_win):
 
 def test_login_dialog_lists_roster_users(qtbot, tmp_path):
     """LoginDialog's user picker is pre-populated from the roster."""
-    from cryosoft.gui.setup_dialogs import LoginDialog
-    from cryosoft.session.models import User
-    from cryosoft.session.store import UserRoster
+    from i2as.gui.setup_dialogs import LoginDialog
+    from i2as.session.models import User
+    from i2as.session.store import UserRoster
 
     roster = UserRoster(tmp_path / "users.json")
     roster.add(User(user_id="jdoe", name="J. Doe"))
@@ -1877,10 +1877,10 @@ def test_switch_user_saves_outgoing_and_loads_incoming_session(
     station, orchestrator, qtbot, tmp_path
 ):
     """_switch_user() persists the outgoing user's fields and loads the incoming one's."""
-    from cryosoft.gui import app_settings as _app_settings
-    from cryosoft.session.manager import ExperimentManager
-    from cryosoft.session.models import User
-    from cryosoft.session.store import ExperimentStore, UserRoster
+    from i2as.gui import app_settings as _app_settings
+    from i2as.session.manager import ExperimentManager
+    from i2as.session.models import User
+    from i2as.session.store import ExperimentStore, UserRoster
 
     roster = UserRoster(tmp_path / "users.json")
     roster.add(User(user_id="jdoe", name="J. Doe"))
@@ -1914,10 +1914,10 @@ def test_switch_user_saves_outgoing_and_loads_incoming_session(
 
 def test_load_session_dialog_lists_open_and_closed(station, orchestrator, qtbot, tmp_path):
     """Open experiments are selectable; closed ones are grayed out and disabled."""
-    from cryosoft.gui.open_experiment_dialog import OpenExperimentDialog
-    from cryosoft.session.manager import ExperimentManager
-    from cryosoft.session.models import User
-    from cryosoft.session.store import ExperimentStore, UserRoster
+    from i2as.gui.open_experiment_dialog import OpenExperimentDialog
+    from i2as.session.manager import ExperimentManager
+    from i2as.session.models import User
+    from i2as.session.store import ExperimentStore, UserRoster
 
     roster = UserRoster(tmp_path / "users.json")
     roster.add(User(user_id="jdoe", name="J. Doe"))
@@ -1949,8 +1949,8 @@ def test_load_session_dialog_lists_open_and_closed(station, orchestrator, qtbot,
 
 def test_resume_session_dialog_lists_only_owner_sessions(qtbot, tmp_path):
     """list_sessions(user_id=...) filters the dialog to one user's own sessions."""
-    from cryosoft.gui.session_dialogs import ResumeSessionDialog
-    from cryosoft.session.store import SessionStore
+    from i2as.gui.session_dialogs import ResumeSessionDialog
+    from i2as.session.store import SessionStore
 
     store = SessionStore(tmp_path / "sessions")
     mine = store.create_session(name="My Cooldown", user_id="jdoe")
@@ -1966,8 +1966,8 @@ def test_resume_session_dialog_lists_only_owner_sessions(qtbot, tmp_path):
 
 def test_resume_session_dialog_select_and_accept(qtbot, tmp_path):
     """Selecting a listed session and accepting exposes it via selected_session_id()."""
-    from cryosoft.gui.session_dialogs import ResumeSessionDialog
-    from cryosoft.session.store import SessionStore
+    from i2as.gui.session_dialogs import ResumeSessionDialog
+    from i2as.session.store import SessionStore
 
     store = SessionStore(tmp_path / "sessions")
     session = store.create_session(name="My Cooldown", user_id="jdoe")
@@ -1982,8 +1982,8 @@ def test_resume_session_dialog_select_and_accept(qtbot, tmp_path):
 
 def test_resume_session_dialog_create_new_session(qtbot, tmp_path):
     """The inline "New session…" name field + Create button creates and selects one."""
-    from cryosoft.gui.session_dialogs import ResumeSessionDialog
-    from cryosoft.session.store import SessionStore
+    from i2as.gui.session_dialogs import ResumeSessionDialog
+    from i2as.session.store import SessionStore
 
     store = SessionStore(tmp_path / "sessions")
     dialog = ResumeSessionDialog(store, "jdoe")
@@ -2004,8 +2004,8 @@ def test_resume_session_dialog_create_new_session(qtbot, tmp_path):
 
 def test_resume_session_dialog_no_selection_returns_none(qtbot, tmp_path):
     """selected_session_id() is None when nothing was ever selected."""
-    from cryosoft.gui.session_dialogs import ResumeSessionDialog
-    from cryosoft.session.store import SessionStore
+    from i2as.gui.session_dialogs import ResumeSessionDialog
+    from i2as.session.store import SessionStore
 
     store = SessionStore(tmp_path / "sessions")
     dialog = ResumeSessionDialog(store, "jdoe")
@@ -2019,10 +2019,10 @@ def test_switch_session_saves_outgoing_and_loads_incoming(
 ):
     """_switch_experiment() persists the outgoing session's fields, loads the incoming
     session's own, and round-trips the queue through set_queue()."""
-    from cryosoft.gui.form_autosave import QueueItemState, STATUS_PENDING
-    from cryosoft.session.manager import ExperimentManager
-    from cryosoft.session.models import EXPERIMENT_STATUS_OPEN, ExperimentRecord, User
-    from cryosoft.session.store import ExperimentStore, UserRoster
+    from i2as.gui.form_autosave import QueueItemState, STATUS_PENDING
+    from i2as.session.manager import ExperimentManager
+    from i2as.session.models import EXPERIMENT_STATUS_OPEN, ExperimentRecord, User
+    from i2as.session.store import ExperimentStore, UserRoster
 
     roster = UserRoster(tmp_path / "users.json")
     roster.add(User(user_id="jdoe", name="J. Doe"))
@@ -2070,9 +2070,9 @@ def test_switch_session_rejects_unknown_id_with_warning(
     station, orchestrator, qtbot, tmp_path, monkeypatch
 ):
     """An unknown/closed target surfaces QMessageBox.warning instead of crashing."""
-    from cryosoft.session.manager import ExperimentManager
-    from cryosoft.session.models import User
-    from cryosoft.session.store import ExperimentStore, UserRoster
+    from i2as.session.manager import ExperimentManager
+    from i2as.session.models import User
+    from i2as.session.store import ExperimentStore, UserRoster
 
     roster = UserRoster(tmp_path / "users.json")
     roster.add(User(user_id="jdoe", name="J. Doe"))
@@ -2112,8 +2112,8 @@ def test_open_resume_session_dialog_sets_active_and_notes_status(
     station, orchestrator, session_manager, qtbot, tmp_path, monkeypatch
 ):
     """Picking a session persists it via SessionStore.set_active and notes the status bar."""
-    from cryosoft.gui import monitor_window as mw
-    from cryosoft.session.store import SessionStore
+    from i2as.gui import monitor_window as mw
+    from i2as.session.store import SessionStore
 
     store = SessionStore(tmp_path / "sessions")
     created = store.create_session(name="Cooldown 3", user_id="jdoe")
@@ -2148,9 +2148,9 @@ def test_open_resume_session_dialog_resolves_logged_out_user_to_guest(
     station, orchestrator, session_manager, qtbot, tmp_path, monkeypatch
 ):
     """Nobody logged in: the dialog lists/activates sessions under the Guest identity."""
-    from cryosoft.gui import monitor_window as mw
-    from cryosoft.session.models import GUEST_USER_ID
-    from cryosoft.session.store import SessionStore
+    from i2as.gui import monitor_window as mw
+    from i2as.session.models import GUEST_USER_ID
+    from i2as.session.store import SessionStore
 
     store = SessionStore(tmp_path / "sessions")
     created = store.create_session(name="Walk-in Cooldown", user_id=GUEST_USER_ID)
@@ -2338,10 +2338,10 @@ def test_save_session_targets_session_folder_when_open_else_per_user_file(
 
 def test_open_login_dialog_full_flow(station, orchestrator, qtbot, tmp_path, monkeypatch):
     """Confirming LoginDialog switches the current user."""
-    from cryosoft.gui import monitor_window as mw
-    from cryosoft.session.manager import ExperimentManager
-    from cryosoft.session.models import User
-    from cryosoft.session.store import ExperimentStore, UserRoster
+    from i2as.gui import monitor_window as mw
+    from i2as.session.manager import ExperimentManager
+    from i2as.session.models import User
+    from i2as.session.store import ExperimentStore, UserRoster
 
     roster = UserRoster(tmp_path / "users.json")
     roster.add(User(user_id="jdoe", name="J. Doe"))
@@ -2377,10 +2377,10 @@ def test_instrument_info_action_opens_dialog_with_config_metadata(
     station, orchestrator, qtbot, monkeypatch
 ):
     """Config menu's Instrument Info… reads read_instrument_metadata() for the active config."""
-    from cryosoft.gui import monitor_window as mw
+    from i2as.gui import monitor_window as mw
 
     win = MonitorWindow(
-        station, orchestrator, active_config_path="cryosoft/configs/sim_cryostat"
+        station, orchestrator, active_config_path="i2as/configs/sim_cryostat"
     )
     qtbot.addWidget(win)
     win.show()
@@ -2402,7 +2402,7 @@ def test_instrument_info_action_opens_dialog_with_config_metadata(
 
 def test_instrument_info_dialog_handles_empty_metadata(qtbot):
     """An empty metadata dict shows the fallback message instead of an empty scroll area."""
-    from cryosoft.gui.setup_dialogs import InstrumentInfoDialog
+    from i2as.gui.setup_dialogs import InstrumentInfoDialog
 
     dialog = InstrumentInfoDialog({})
     qtbot.addWidget(dialog)
@@ -2572,7 +2572,7 @@ def test_blank_file_prefix_omitted_from_queue_label(procedure_win, qtbot):
 
 def test_probe_first_queues_a_reduced_run_ahead_of_the_item(procedure_win, qtbot):
     """A probe of the selected run goes in FRONT of it, validated like any run."""
-    from cryosoft.gui.queue_panel import DEFAULT_PROBE_SPEC
+    from i2as.gui.queue_panel import DEFAULT_PROBE_SPEC
 
     panel = procedure_win._queue_panel
     procedure_win._on_add_to_queue()
@@ -2602,7 +2602,7 @@ def test_a_probe_row_says_so_once(procedure_win):
     """The label names the probe once — a prefix that already says it is enough."""
     import dataclasses
 
-    from cryosoft.gui.queue_panel import QueueEntry
+    from i2as.gui.queue_panel import QueueEntry
 
     panel = procedure_win._queue_panel
     procedure_win._on_add_to_queue()
@@ -2679,7 +2679,7 @@ def test_procedure_window_on_the_imaging_station_ignores_the_image_column(qtbot)
     The image-block standard says the live plot ignores image columns and
     plots the VI's scalars; this pins that for the shipped camera VI.
     """
-    host = build_host("cryosoft/configs/sim_imaging")
+    host = build_host("i2as/configs/sim_imaging")
     try:
         station = host.station
         orchestrator = host.build_proxy()
@@ -3014,7 +3014,7 @@ def test_procedure_right_quadrant_has_the_queue_and_elab_tabs(procedure_win):
 
 def test_procedure_window_builds_with_no_elab_collaborators(procedure_win):
     """Built with no session layer, the eLab tab says so and offers nothing."""
-    from cryosoft.gui.analysis_panel import NO_SESSION_TEXT
+    from i2as.gui.analysis_panel import NO_SESSION_TEXT
 
     panel = procedure_win.findChild(QWidget, "analysis_panel")
     assert panel is not None
@@ -3047,22 +3047,22 @@ def test_logs_page_holds_the_log_panel(monitor_win):
     Ported from the deleted servicing-log-page suite — the LogPanel's home
     is the property that outlived the tables it used to sit beside.
     """
-    from cryosoft.gui.log_panel import LogPanel
+    from i2as.gui.log_panel import LogPanel
 
     assert monitor_win._logs_page.findChild(LogPanel, "log_panel") is monitor_win._log_panel
     assert monitor_win._page_stack.indexOf(monitor_win._logs_page) == 1
 
 
 def test_log_handler_removed_on_close(station, orchestrator, qtbot):
-    """Closing MonitorWindow detaches its log handler from the cryosoft logger."""
+    """Closing MonitorWindow detaches its log handler from the i2as logger."""
     win = MonitorWindow(station, orchestrator)
     qtbot.addWidget(win)
     handler = win._log_panel.handler
-    cryosoft_logger = logging.getLogger("cryosoft")
-    assert handler in cryosoft_logger.handlers
+    i2as_logger = logging.getLogger("i2as")
+    assert handler in i2as_logger.handlers
 
     win.close()
-    assert handler not in cryosoft_logger.handlers
+    assert handler not in i2as_logger.handlers
 
 
 def test_closing_window_persists_to_isolated_ini_not_real_scope(
@@ -3326,7 +3326,7 @@ def test_monitor_saves_session_on_close(monitor_win, tmp_path):
 
 def test_new_session_clears_fields(monitor_win, monkeypatch):
     """New Session (confirmed) resets the Sample Info fields to defaults."""
-    from cryosoft.core.paths import measurement_root
+    from i2as.core.paths import measurement_root
 
     monitor_win._session_info._sample_name_input.setText("ToClear")
     monkeypatch.setattr(
@@ -3567,7 +3567,7 @@ def test_instrument_info_lives_in_the_user_menu(monitor_win):
 
 def test_startup_candidates_end_with_sim_and_dedup(monkeypatch):
     """The candidate chain always ends with sim_cryostat and has no duplicates."""
-    from cryosoft import main as app_main
+    from i2as import main as app_main
 
     monkeypatch.setattr(_app_settings, "config_active", lambda: None)
     candidates = app_main._startup_candidates()
@@ -3577,7 +3577,7 @@ def test_startup_candidates_end_with_sim_and_dedup(monkeypatch):
 
 def test_startup_candidates_inserts_shipped_baseline_for_user_config(tmp_path, monkeypatch):
     """An active user config is followed by its shipped baseline, then sim."""
-    from cryosoft import main as app_main
+    from i2as import main as app_main
 
     catalog = _catalog(tmp_path)
     entry = catalog.fork_shipped("sim_cryostat", "sim_cryostat")
@@ -3758,7 +3758,7 @@ def test_offline_reconnect_failure_reports_inline(tmp_path, qtbot):
 
 # ── Availability standard: tag-keyed offline wording ─────────────────────────
 # The offline card's badge/note and the detail window's title/header/hint are
-# selected from OfflineInstrument.tags (cryosoft.core.availability) via a
+# selected from OfflineInstrument.tags (i2as.core.availability) via a
 # tag-keyed mapping (offline_panel._wording_for()), covering every tag
 # combination the offline registry can produce.
 
@@ -3802,7 +3802,7 @@ def test_offline_card_wording_for_operator_only(qtbot):
 
         win.findChild(QGroupBox, "magnet_z_offline_card")._open_details()
         header = win.findChild(QLabel, "magnet_z_offline_detail_header")
-        assert "CryoSoft is not holding it" in header.text()
+        assert "I2AS is not holding it" in header.text()
         hint = win.findChild(QLabel, "magnet_z_offline_detail_hint")
         assert "you released this instrument" in hint.text().lower()
         assert "front panel or" in hint.text().lower()
@@ -3997,7 +3997,7 @@ def test_disconnect_mid_run_swaps_the_card_for_a_vi_the_run_does_not_claim(qtbot
 
 
 # ── Widget-lifetime standards: window liveness + card retirement ─────────────
-# See cryosoft/gui/widget_lifecycle.py. A shown window whose creator kept no
+# See i2as/gui/widget_lifecycle.py. A shown window whose creator kept no
 # reference used to be destroyed by whichever generational garbage-collection
 # pass happened to reach it — including one triggered by an allocation inside
 # that same window's paintEvent, which destroyed the paint device mid-paint and

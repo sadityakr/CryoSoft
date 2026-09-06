@@ -3,9 +3,9 @@
 
 The layer suites test each half against a stand-in (the runner against a fake
 worker, the worker against a spec file, the publisher against a fake report).
-This test wires the REAL pieces together the way ``cryosoft.main`` does —
+This test wires the REAL pieces together the way ``i2as.main`` does —
 ``ElnPublisher.analysis_requested`` → ``AnalysisRunner.start`` →
-``python -m cryosoft.analysis run`` → ``export_report`` → the pending entry →
+``python -m i2as.analysis run`` → ``export_report`` → the pending entry →
 ``approve_eln_draft`` → the outbox drain — over a real HDF5 run file written
 by the data manager, and asserts that only the analysed, concise entry with
 its figure reaches the notebook.
@@ -19,18 +19,18 @@ from pathlib import Path
 
 import pytest
 
-from cryosoft.analysis.report import REPORT_FILENAME, AnalysisReport
-from cryosoft.core.data_manager import DataManager
-from cryosoft.core.orchestrator import Orchestrator
-from cryosoft.core.station import build_station
-from cryosoft.session.analysis_runner import AnalysisRunner
-from cryosoft.session.eln.outbox import DRAIN_PUBLISHED
-from cryosoft.session.eln.publisher import ElnPublisher
-from cryosoft.session.eln.settings import AnalysisSettings, ElnSettings
-from cryosoft.session.eln.sim_eln import SimElnAdapter
-from cryosoft.session.manager import ExperimentManager
-from cryosoft.session.models import User
-from cryosoft.session.store import ExperimentStore, UserRoster
+from i2as.analysis.report import REPORT_FILENAME, AnalysisReport
+from i2as.core.data_manager import DataManager
+from i2as.core.orchestrator import Orchestrator
+from i2as.core.station import build_station
+from i2as.session.analysis_runner import AnalysisRunner
+from i2as.session.eln.outbox import DRAIN_PUBLISHED
+from i2as.session.eln.publisher import ElnPublisher
+from i2as.session.eln.settings import AnalysisSettings, ElnSettings
+from i2as.session.eln.sim_eln import SimElnAdapter
+from i2as.session.manager import ExperimentManager
+from i2as.session.models import User
+from i2as.session.store import ExperimentStore, UserRoster
 
 pytestmark = pytest.mark.skipif(
     sys.platform.startswith("win"), reason="POSIX subprocess semantics assumed"
@@ -137,7 +137,7 @@ def _wire(tmp_path, monkeypatch, *, config_name: str, procedure: str, write_run,
     roster = UserRoster(tmp_path / "users.json")
     roster.add(User(user_id="jdoe", name="J. Doe"))
     orchestrator = Orchestrator(
-        build_station(f"cryosoft/configs/{config_name}"), tick_interval_ms=10
+        build_station(f"i2as/configs/{config_name}"), tick_interval_ms=10
     )
     manager = ExperimentManager(
         store=store, roster=roster, orchestrator=orchestrator, config_name=config_name
@@ -253,7 +253,7 @@ def test_a_failing_recipe_parks_a_facts_only_entry(wired, qtbot):
     recipes_dir = manager.store.recipes_dir(experiment_id)
     recipes_dir.mkdir(parents=True)
     (recipes_dir / "broken.py").write_text(
-        "from cryosoft.analysis.base import AnalysisRecipe\n"
+        "from i2as.analysis.base import AnalysisRecipe\n"
         "class Broken(AnalysisRecipe):\n"
         "    name = 'broken'\n"
         "    procedures = ('Field Sweep',)\n"

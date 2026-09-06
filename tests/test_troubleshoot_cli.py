@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from cryosoft.troubleshoot import cli
+from i2as.troubleshoot import cli
 from tests.test_troubleshoot_engine import (
     _THIS,
     FakeInstrument,
@@ -19,7 +19,7 @@ from tests.test_troubleshoot_engine import (
 
 # Captured before the autouse isolated_transcript fixture below patches
 # cli._transcript_dir per-test, so a test can restore the real resolver
-# delegation and check it against CRYOSOFT_LOG_DIR.
+# delegation and check it against I2AS_LOG_DIR.
 _REAL_TRANSCRIPT_DIR = cli._transcript_dir
 
 
@@ -60,7 +60,7 @@ def sim_config(tmp_path: Path) -> str:
         tmp_path / "cfg",
         {
             "meter": {
-                "class": "cryosoft.drivers.sim_keithley_2182a.SimKeithley2182A",
+                "class": "i2as.drivers.sim_keithley_2182a.SimKeithley2182A",
                 "address": "SIM::CLI",
             }
         },
@@ -77,7 +77,7 @@ def sim_config_without_trends(tmp_path: Path) -> str:
         tmp_path / "cfg_plain",
         {
             "meter": {
-                "class": "cryosoft.drivers.sim_keithley_2182a.SimKeithley2182A",
+                "class": "i2as.drivers.sim_keithley_2182a.SimKeithley2182A",
                 "address": "SIM::CLI",
             }
         },
@@ -256,10 +256,10 @@ def _write_trend_jsonl(path: Path, records: list[dict]) -> None:
 
 @pytest.fixture()
 def isolated_trend_log_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A fresh, empty log directory, wired through CRYOSOFT_LOG_DIR."""
+    """A fresh, empty log directory, wired through I2AS_LOG_DIR."""
     log_dir = tmp_path / "trend_logs"
     log_dir.mkdir()
-    monkeypatch.setenv("CRYOSOFT_LOG_DIR", str(log_dir))
+    monkeypatch.setenv("I2AS_LOG_DIR", str(log_dir))
     return log_dir
 
 
@@ -397,10 +397,10 @@ def test_transcript_appends_one_jsonl_line_per_invocation(
 def test_transcript_dir_resolves_through_log_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sim_config, capsys
 ) -> None:
-    """`_transcript_dir()` delegates to log_directory(), so CRYOSOFT_LOG_DIR
+    """`_transcript_dir()` delegates to log_directory(), so I2AS_LOG_DIR
     steers both the transcript and the `status` command's default log path."""
     monkeypatch.setattr(cli, "_transcript_dir", _REAL_TRANSCRIPT_DIR)
-    monkeypatch.setenv("CRYOSOFT_LOG_DIR", str(tmp_path))
+    monkeypatch.setenv("I2AS_LOG_DIR", str(tmp_path))
 
     cli.main(["idn", "meter", "--config", sim_config, "--json"])
 

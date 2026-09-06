@@ -8,7 +8,7 @@
 #   that say so. Runs unchanged in both instrument modes:
 #
 #       pytest tests/test_instrument_modes.py
-#       CRYOSOFT_INSTRUMENT_THREAD=0 pytest tests/test_instrument_modes.py
+#       I2AS_INSTRUMENT_THREAD=0 pytest tests/test_instrument_modes.py
 # last_updated: 2026-09-04
 # ---
 
@@ -34,7 +34,7 @@ from tests.instrument_modes import (
     shutdown_host,
 )
 
-CONFIG_PATH = "cryosoft/configs/sim_cryostat"
+CONFIG_PATH = "i2as/configs/sim_cryostat"
 
 #: The bound the bounded tests ask for. Short enough that a failing bound is
 #: a fast test, long enough that a loaded machine does not trip it early.

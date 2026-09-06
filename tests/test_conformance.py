@@ -1,6 +1,6 @@
 ﻿# ---
 # description: |
-#   Auto-discovering conformance tests for the CryoSoft layer interfaces.
+#   Auto-discovering conformance tests for the I2AS layer interfaces.
 #   These tests iterate over the drivers, virtual_instruments, procedures, and
 #   configs packages themselves, so any NEW module an agent adds is checked
 #   automatically — no test needs to be written for it to be covered.
@@ -35,16 +35,16 @@ import-linter, see pyproject.toml [tool.importlinter]):
   so a VI's capability manifest is complete the moment its file exists.
 * Procedures: subclass BaseProcedure, have a name, declare a default for every
   parameter, and are constructible from defaults alone.
-* Configs: every ``cryosoft/configs/<name>/`` directory has a loadable
+* Configs: every ``i2as/configs/<name>/`` directory has a loadable
   devices.yaml + monitor.yaml whose classes import and whose driver references
   resolve.
 * The code-reference standard (see CLAUDE.md): no source file or folder
-  README under ``cryosoft/`` cites a document in ``docs/plans/``. Plans are
+  README under ``i2as/`` cites a document in ``docs/plans/``. Plans are
   dated proposals that get implemented, superseded and archived, so a
   citation rots silently; the code and its READMEs must present the complete
   picture on their own. Vendor manual sections are the deliberate exception
   and are not flagged.
-* The responsive-GUI rule (see gui/README.md): nothing under ``cryosoft/gui/``
+* The responsive-GUI rule (see gui/README.md): nothing under ``i2as/gui/``
   blocks the Qt event loop with ``time.sleep``.
 * The recipe contract (see analysis/base.py and analysis/README.md): every
   shipped **analysis recipe** declares a snake_case ``name``, a non-empty
@@ -52,7 +52,7 @@ import-linter, see pyproject.toml [tool.importlinter]):
   ``analyse(self, run, context)`` with the contract's signature, and returns
   one ``ok`` **analysis report** for a real run file.
 * The folder README standard (see CLAUDE.md): every folder README under
-  ``cryosoft/`` carries the seven canonical sections, in order.
+  ``i2as/`` carries the seven canonical sections, in order.
 """
 
 from __future__ import annotations
@@ -72,18 +72,18 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-import cryosoft.core
-import cryosoft.drivers
-import cryosoft.procedures
-import cryosoft.virtual_instruments
-from cryosoft.core.availability import (
+import i2as.core
+import i2as.drivers
+import i2as.procedures
+import i2as.virtual_instruments
+from i2as.core.availability import (
     AVAILABILITY_STATES,
     AVAILABILITY_TAGS,
     TAG_POLICY,
     TAG_PRECEDENCE,
 )
-from cryosoft.core.conditions import SEVERITIES
-from cryosoft.core.events import (
+from i2as.core.conditions import SEVERITIES
+from i2as.core.events import (
     OPERATOR,
     Actor,
     ActorKind,
@@ -107,7 +107,7 @@ from cryosoft.core.events import (
     VerdictCode,
     event_from_json,
 )
-from cryosoft.core.decorators import (
+from i2as.core.decorators import (
     VALID_CONTROL_SCOPES,
     control,
     get_control_panel,
@@ -119,21 +119,21 @@ from cryosoft.core.decorators import (
     get_ui_group,
     monitored,
 )
-from cryosoft.core.exceptions import (
-    CryoSoftCommunicationError,
-    CryoSoftInstrumentError,
-    CryoSoftPrivateActionError,
-    CryoSoftSafetyError,
-    CryoSoftUndeclaredActionError,
+from i2as.core.exceptions import (
+    I2ASCommunicationError,
+    I2ASInstrumentError,
+    I2ASPrivateActionError,
+    I2ASSafetyError,
+    I2ASUndeclaredActionError,
 )
-from cryosoft.core.plan import SETPOINT_PARAM_PREFIX, ImageBlock, ParamSpec, UIGroup
-from cryosoft.core.procedure import BaseProcedure
-from cryosoft.core.capability_manifest import (
+from i2as.core.plan import SETPOINT_PARAM_PREFIX, ImageBlock, ParamSpec, UIGroup
+from i2as.core.procedure import BaseProcedure
+from i2as.core.capability_manifest import (
     _instrument_json,
     build_manifest,
     validate_manifest,
 )
-from cryosoft.core.station import (
+from i2as.core.station import (
     LIFECYCLE_ACTIONS,
     Station,
     _control_infos,
@@ -141,21 +141,21 @@ from cryosoft.core.station import (
     _monitored_infos,
     build_station,
 )
-from cryosoft.session.maintenance_log import DECLARED_LOG_KINDS
+from i2as.session.maintenance_log import DECLARED_LOG_KINDS
 from tests.mocks.bus_spy import spy_on_station
-from cryosoft.virtual_instruments.base import (
+from i2as.virtual_instruments.base import (
     EXCITATION_CURRENT_LIMIT,
     MAX_SOURCE_CURRENT_KEY,
     BaseVirtualInstrument,
     MeasurementInstrumentBase,
 )
-from cryosoft.virtual_instruments.rampable import RampableVI
+from i2as.virtual_instruments.rampable import RampableVI
 
 #: The package under test, derived once. Every module prefix, config path and
 #: source-tree scan in this file comes from these, so a package rename is a
 #: no-op here.
-PACKAGE = cryosoft.__name__
-PACKAGE_DIR = Path(cryosoft.__file__).parent
+PACKAGE = i2as.__name__
+PACKAGE_DIR = Path(i2as.__file__).parent
 CONFIGS_DIR = PACKAGE_DIR / "configs"
 #: The example station every station-dependent contract is checked on.
 SIM_STATION_CONFIG = str(CONFIGS_DIR / "sim_cryostat")
@@ -174,7 +174,7 @@ CONFIG_VI_TYPES = {"system", "measurement"}
 
 
 def _driver_module_names() -> list[str]:
-    return sorted(m.name for m in pkgutil.iter_modules(cryosoft.drivers.__path__))
+    return sorted(m.name for m in pkgutil.iter_modules(i2as.drivers.__path__))
 
 
 def _public_classes(module) -> list[type]:
@@ -199,10 +199,10 @@ def _public_api(cls: type) -> dict[str, inspect.Signature]:
 
 
 def _all_vi_classes() -> list[type]:
-    """Every concrete VI class in cryosoft.virtual_instruments."""
+    """Every concrete VI class in i2as.virtual_instruments."""
     classes: list[type] = []
     for mod_info in pkgutil.walk_packages(
-        cryosoft.virtual_instruments.__path__, prefix=f"{PACKAGE}.virtual_instruments."
+        i2as.virtual_instruments.__path__, prefix=f"{PACKAGE}.virtual_instruments."
     ):
         if mod_info.name in VI_BASE_MODULES:
             continue
@@ -215,7 +215,7 @@ def _all_vi_classes() -> list[type]:
 
 def _all_procedure_classes() -> list[type]:
     classes: list[type] = []
-    for mod_info in pkgutil.iter_modules(cryosoft.procedures.__path__):
+    for mod_info in pkgutil.iter_modules(i2as.procedures.__path__):
         module = importlib.import_module(f"{PACKAGE}.procedures.{mod_info.name}")
         for cls in _public_classes(module):
             if issubclass(cls, BaseProcedure) and cls is not BaseProcedure:
@@ -300,7 +300,7 @@ def test_driver_has_close(module_name: str) -> None:
     front panel or vendor software. ``Station.disconnect_instrument()`` calls
     it on every driver the disconnecting VI exclusively owns, so a driver
     without one would silently leak a session that keeps the instrument
-    locked to CryoSoft.
+    locked to I2AS.
     """
     module = importlib.import_module(f"{PACKAGE}.drivers.{module_name}")
     (cls,) = _public_classes(module)
@@ -439,7 +439,7 @@ def test_sim_driver_is_dead_after_close(module_name: str) -> None:
     driver.get_idn()  # reachable before the close
     driver.close()
     driver.close()  # idempotent — must not raise
-    with pytest.raises(CryoSoftCommunicationError):
+    with pytest.raises(I2ASCommunicationError):
         driver.get_idn()
 
 
@@ -526,7 +526,7 @@ def test_vi_contract(vi_cls: type) -> None:
 
 # Commands a VI's __init__ MAY still issue on its drivers. `close` is a
 # RELEASE, not a state change: an externally configured VI is born detached so
-# that starting CryoSoft while the vendor tool holds the instrument works at
+# that starting I2AS while the vendor tool holds the instrument works at
 # all (see MeasurementInstrumentBase's "Externally configured instruments").
 _SILENT_CONSTRUCTION_ALLOWED = frozenset({"close"})
 
@@ -570,7 +570,7 @@ def test_vi_construction_sends_no_commands(
     Constructs the VI with recording stand-ins for its drivers and asserts
     nothing was called on them. Building the Station is a *connection* act:
     the only command it sends is the identity query, so an operator who
-    starts CryoSoft mid-experiment — or while the instrument is on its own
+    starts I2AS mid-experiment — or while the instrument is on its own
     front panel — finds every instrument exactly as they left it. A setup
     command that wants to run at bring-up belongs in ``initiate()``.
 
@@ -639,7 +639,7 @@ def test_vi_has_connection_lifecycle_hooks(vi_cls: type) -> None:
         )
 
 
-# ── Availability standard (cryosoft.core.availability) ───────────────────────
+# ── Availability standard (i2as.core.availability) ───────────────────────
 # See availability.py's module docstring: a closed tag vocabulary, a derived
 # state vocabulary, and a declared tag -> policy table (TAG_POLICY) are the
 # one place the "why can't I use this instrument?" policies are stated. These
@@ -813,7 +813,7 @@ def test_detach_when_idle_vi_owns_its_driver_aliases_exclusively() -> None:
     detach_when_idle fails CI instead of silently breaking the other VI's
     session in the field.
     """
-    from cryosoft.core.station import _exclusive_aliases
+    from i2as.core.station import _exclusive_aliases
 
     detach_when_idle_spec_ids = {spec_id for spec_id, *_ in _detach_when_idle_vi_specs()}
 
@@ -852,7 +852,7 @@ def test_detach_when_idle_vi_owns_its_driver_aliases_exclusively() -> None:
 # standard's severity ladder (scope follows from severity: "hold" is scoped
 # to concerned VIs, "critical" is station-wide by definition, "advisory" is
 # reserved with no enforcement yet), canonically declared in
-# cryosoft.core.conditions.
+# i2as.core.conditions.
 SAFETY_FLAG_SEVERITIES = SEVERITIES
 
 
@@ -1007,7 +1007,7 @@ def test_procedure_roles_resolve_on_the_sim_station(proc_cls: type) -> None:
     shipped sim station every candidate list is a subset of the registered
     VIs.
     """
-    from cryosoft.core.procedure import RoleParam
+    from i2as.core.procedure import RoleParam
 
     station = build_station(SIM_STATION_CONFIG)
     for param_name, role in proc_cls.role_parameters.items():
@@ -1058,7 +1058,7 @@ def test_procedure_choices_spec(proc_cls: type) -> None:
 
     A parameter that declares 'choices' renders as a GUI drop-down and its
     collected value is the *mapped* value (see BaseProcedure docstring and
-    cryosoft.gui.param_form.build_param_widget). The three invariants this test
+    i2as.gui.param_form.build_param_widget). The three invariants this test
     used to assert one by one — choices is a non-empty label->value dict, every
     value is an instance of the declared 'type', and 'default' is one of the
     mapped values — have moved INTO the type: ParamSpec.__post_init__ enforces
@@ -1166,7 +1166,7 @@ def test_config_schema(config_dir: Path) -> None:
     for drv_name, drv_cfg in devices["real_drivers"].items():
         assert "class" in drv_cfg, f"driver '{drv_name}' lacks a 'class' entry"
         assert "address" in drv_cfg, f"driver '{drv_name}' lacks an 'address' entry"
-        _import_class(drv_cfg["class"])  # raises CryoSoftConfigError if broken
+        _import_class(drv_cfg["class"])  # raises I2ASConfigError if broken
 
     for vi_name, vi_cfg in devices.get("virtual_instruments", {}).items():
         assert "class" in vi_cfg, f"VI '{vi_name}' lacks a 'class' entry"
@@ -1191,7 +1191,7 @@ def test_panels_config_names_real_vis_and_controls(config_dir: Path) -> None:
     A typo'd VI or control name would otherwise fail silently — the card
     would just render without the control the operator expected.
     """
-    from cryosoft.core.config import read_panels_config
+    from i2as.core.config import read_panels_config
 
     panels = read_panels_config(str(config_dir))
     if not panels:
@@ -1259,7 +1259,7 @@ def test_config_populates_all_declared_control_limits(config_dir: Path) -> None:
     """Every limit a VI declares must be populated when built from this config.
 
     A declared-but-unpopulated limit would otherwise only explode when a user
-    presses the button (CryoSoftConfigError at call time); this test moves
+    presses the button (I2ASConfigError at call time); this test moves
     that failure to CI.
     """
     station = build_station(str(config_dir))
@@ -1280,7 +1280,7 @@ def test_declared_finite_limits_reject_out_of_range(config_dir: Path) -> None:
     """Every finite upper limit actually refuses an out-of-range @control call.
 
     Calls each limited @control method with a value beyond its declared
-    maximum and requires CryoSoftSafetyError — i.e. the standard is not just
+    maximum and requires I2ASSafetyError — i.e. the standard is not just
     declared, it is enforced, for every VI in every buildable config.
     """
     station = build_station(str(config_dir))
@@ -1308,7 +1308,7 @@ def test_declared_finite_limits_reject_out_of_range(config_dir: Path) -> None:
                 if not buildable:
                     continue
                 kwargs[param_name] = hi + abs(hi) + 1.0
-                with pytest.raises(CryoSoftSafetyError):
+                with pytest.raises(I2ASSafetyError):
                     method(**kwargs)
                 enforced += 1
     assert enforced > 0, (
@@ -1347,7 +1347,7 @@ def test_evaluate_safety_flags_are_declared_in_manifest(config_dir: Path) -> Non
 
 
 # ── Control-declaration standard (GUI metadata) ──────────────────────────────
-# See cryosoft.core.decorators: @control optionally declares params=
+# See i2as.core.decorators: @control optionally declares params=
 # {name: ParamSpec} (widget shape, unit, bounds, choices) and panel=
 # (default monitor-card placement). The decorator enforces name matching and
 # the VI base class enforces the ParamSpec type at import; these tests bind
@@ -1517,7 +1517,7 @@ def test_sweep_axis_specs_are_described() -> None:
     separately from its three explicit dicts, so
     ``test_procedure_parameter_has_description`` never reached them.
     """
-    from cryosoft.core.sweep_builder import sweep_axis_param_specs
+    from i2as.core.sweep_builder import sweep_axis_param_specs
 
     checked = 0
     for proc_cls in _all_procedure_classes():
@@ -1638,7 +1638,7 @@ def test_valid_group_declaration_is_accepted() -> None:
 
 
 # ── Capability-scope standard ─────────────────────────────────────────────────
-# See cryosoft.core.decorators ("@control gains a scope") and GLOSSARY.md's
+# See i2as.core.decorators ("@control gains a scope") and GLOSSARY.md's
 # "Capability scope" entry: every @control method carries "measurement"
 # (default, usable by any plan) or "operation" (usable only by an operation's
 # plan; still an ordinary GUI control). These tests make the standard binding
@@ -2076,7 +2076,7 @@ def test_execute_vi_action_refuses_non_control_names(config_dir: Path) -> None:
     checked_undeclared = 0
     for vi_name in station.get_vi_names():
         vi = getattr(station, vi_name)
-        with pytest.raises(CryoSoftPrivateActionError):
+        with pytest.raises(I2ASPrivateActionError):
             station.execute_vi_action(vi_name, "_limits")
         checked_private += 1
         for name, member in inspect.getmembers(type(vi), inspect.isfunction):
@@ -2084,7 +2084,7 @@ def test_execute_vi_action_refuses_non_control_names(config_dir: Path) -> None:
                 continue
             if getattr(getattr(vi, name), "_is_control", False):
                 continue
-            with pytest.raises(CryoSoftUndeclaredActionError):
+            with pytest.raises(I2ASUndeclaredActionError):
                 station.execute_vi_action(vi_name, name)
             checked_undeclared += 1
     assert checked_private > 0 and checked_undeclared > 0, (
@@ -2385,7 +2385,7 @@ def test_measurement_vi_arms_after_a_shared_instrument_was_left_in_another_mode(
     Exactly two outcomes are acceptable, and this is the whole standard:
     either the second VI re-asserts its own mode first and goes on to
     produce the readings it declares, or the instrument refuses and the
-    driver says so as a typed ``CryoSoftInstrumentError`` carrying the
+    driver says so as a typed ``I2ASInstrumentError`` carrying the
     instrument's own code. What is never acceptable is the third outcome —
     the one that actually happened on hardware in the ``-221`` incident —
     where the write is silently rejected, the VI believes it armed, and
@@ -2400,7 +2400,7 @@ def test_measurement_vi_arms_after_a_shared_instrument_was_left_in_another_mode(
     second_defaults = _measurement_defaults(second_cls)
     try:
         second_vi.initiate_measurement(**second_defaults)
-    except CryoSoftInstrumentError as exc:
+    except I2ASInstrumentError as exc:
         # The other permitted outcome: the instrument refuses, and the driver
         # says so in the instrument's own words. Anything less specific — a
         # bare Exception, or a plain communication error — is not caught here
@@ -2474,8 +2474,8 @@ def test_measurement_vi_raw_block_names_dont_collide(vi_cls: type) -> None:
 
 
 # ── Session-model standard (L6) ───────────────────────────────────────────────
-# Every dataclass in cryosoft.session.models follows the tolerant-parse
-# contract (see the module docstring and cryosoft/session/README.md):
+# Every dataclass in i2as.session.models follows the tolerant-parse
+# contract (see the module docstring and i2as/session/README.md):
 # constructs from defaults alone, to_dict() is JSON-safe, from_dict() accepts
 # junk without raising and round-trips to_dict() output. A new model in
 # models.py is covered the moment the class exists.
@@ -2484,7 +2484,7 @@ def test_measurement_vi_raw_block_names_dont_collide(vi_cls: type) -> None:
 def _session_model_classes() -> list[type]:
     import dataclasses
 
-    from cryosoft.session import models
+    from i2as.session import models
 
     return [
         obj
@@ -2528,8 +2528,8 @@ def test_session_model_from_dict_tolerates_junk(model_cls: type, junk) -> None:
     assert isinstance(result, model_cls)
 
 
-# ── ELN adapter standard (L6, cryosoft/session/eln/) ──────────────────────────
-# The adapter contract written at the top of cryosoft/session/eln/adapter.py:
+# ── ELN adapter standard (L6, i2as/session/eln/) ──────────────────────────
+# The adapter contract written at the top of i2as/session/eln/adapter.py:
 # one concrete ElnAdapter per backend module, constructed from a single plain
 # settings mapping, declaring a backend id and its capabilities, and exposing
 # EXACTLY the contract's methods so any adapter substitutes for any other. A
@@ -2537,9 +2537,9 @@ def test_session_model_from_dict_tolerates_junk(model_cls: type, junk) -> None:
 
 
 def _eln_adapter_classes() -> list[type]:
-    """Every concrete ElnAdapter subclass in cryosoft.session.eln."""
-    import cryosoft.session.eln as eln_pkg
-    from cryosoft.session.eln.adapter import ElnAdapter
+    """Every concrete ElnAdapter subclass in i2as.session.eln."""
+    import i2as.session.eln as eln_pkg
+    from i2as.session.eln.adapter import ElnAdapter
 
     classes: list[type] = []
     for mod_info in pkgutil.iter_modules(eln_pkg.__path__):
@@ -2555,8 +2555,8 @@ def _eln_adapter_classes() -> list[type]:
 
 
 def _eln_dict_dataclasses() -> list[type]:
-    """Every to_dict()-carrying dataclass defined in cryosoft.session.eln."""
-    import cryosoft.session.eln as eln_pkg
+    """Every to_dict()-carrying dataclass defined in i2as.session.eln."""
+    import i2as.session.eln as eln_pkg
 
     classes: list[type] = []
     for mod_info in pkgutil.iter_modules(eln_pkg.__path__):
@@ -2574,7 +2574,7 @@ def _eln_dict_dataclasses() -> list[type]:
 @pytest.mark.parametrize("adapter_cls", _eln_adapter_classes(), ids=lambda c: c.__name__)
 def test_eln_adapter_public_api_is_exactly_the_contract(adapter_cls: type) -> None:
     """An adapter adds no public method and drops none — full substitutability."""
-    from cryosoft.session.eln.adapter import ElnAdapter
+    from i2as.session.eln.adapter import ElnAdapter
 
     contract = _public_api(ElnAdapter)
     actual = _public_api(adapter_cls)
@@ -2623,7 +2623,7 @@ def test_eln_adapter_constructs_from_a_plain_settings_mapping(adapter_cls: type)
 @pytest.mark.parametrize("adapter_cls", _eln_adapter_classes(), ids=lambda c: c.__name__)
 def test_eln_adapter_declares_backend_and_capabilities(adapter_cls: type) -> None:
     """``backend`` is a lowercase identifier and ``capabilities`` is declared."""
-    from cryosoft.session.eln.adapter import ElnCapabilities
+    from i2as.session.eln.adapter import ElnCapabilities
 
     backend = adapter_cls.backend
     assert backend and backend == backend.lower() and backend.isidentifier(), (
@@ -2644,8 +2644,8 @@ def test_eln_package_has_a_sim_twin() -> None:
     for all of them; a backend's own HTTP dialect is faked one level lower, at
     its injectable transport.
     """
-    from cryosoft.session.eln.adapter import ElnAdapter
-    from cryosoft.session.eln.sim_eln import SimElnAdapter
+    from i2as.session.eln.adapter import ElnAdapter
+    from i2as.session.eln.sim_eln import SimElnAdapter
 
     assert issubclass(SimElnAdapter, ElnAdapter)
     assert SimElnAdapter in _eln_adapter_classes()
@@ -2673,7 +2673,7 @@ def test_eln_rendered_body_is_self_contained_html() -> None:
     No script, no stylesheet, no image, no external URL — so the entry renders
     identically in the notebook, in an export, and in a test snapshot.
     """
-    from cryosoft.session.eln.templates import render_run_body
+    from i2as.session.eln.templates import render_run_body
 
     body = render_run_body(
         {
@@ -2699,7 +2699,7 @@ def test_eln_rendered_body_is_self_contained_html() -> None:
 
 
 # ── Maintenance-log kind standard (L6) ────────────────────────────────────────
-# Every declared LogKindSpec (cryosoft.session.maintenance_log.DECLARED_LOG_KINDS)
+# Every declared LogKindSpec (i2as.session.maintenance_log.DECLARED_LOG_KINDS)
 # must have a valid key, a title, and a non-empty ordered field schema of
 # ParamSpecs — see LogKindSpec's docstring. A new log kind is covered the
 # moment it's added to the registry, no
@@ -2871,8 +2871,8 @@ def test_declared_trend_checks_name_real_state_keys(config_dir: Path) -> None:
     below covers every shipped config, including any real-hardware setup,
     via the static derivation this test's own key set is verified against.
     """
-    from cryosoft.core.config import read_trends_config
-    from cryosoft.core.trend_checks import declared_checks
+    from i2as.core.config import read_trends_config
+    from i2as.core.trend_checks import declared_checks
 
     station = build_station(str(config_dir))
     station.get_state()  # populate the monitor-tick cache last_state_flat() reads
@@ -2924,7 +2924,7 @@ def _static_flat_keys(config_dir: Path) -> set[str]:
     happens, for the two configs it can build.
 
     Args:
-        config_dir: A `cryosoft/configs/<name>/` directory.
+        config_dir: A `i2as/configs/<name>/` directory.
 
     Returns:
         Every `f"{vi_name}_{method_name}"` candidate key.
@@ -2959,8 +2959,8 @@ def test_declared_trend_checks_name_derivable_state_keys(config_dir: Path) -> No
     `test_panels_config_names_real_vis_and_controls` already use to cover
     all four configs.
     """
-    from cryosoft.core.config import read_trends_config
-    from cryosoft.core.trend_checks import declared_checks
+    from i2as.core.config import read_trends_config
+    from i2as.core.trend_checks import declared_checks
 
     derivable_keys = _static_flat_keys(config_dir)
     trends_config = read_trends_config(str(config_dir))
@@ -3407,7 +3407,7 @@ def _orchestrator_public_methods() -> set[str]:
     Returns:
         The set of method names with no leading underscore.
     """
-    from cryosoft.core.orchestrator import Orchestrator
+    from i2as.core.orchestrator import Orchestrator
 
     return {
         name
@@ -3460,7 +3460,7 @@ def test_every_command_method_takes_an_actor() -> None:
     call site. A command method that forgets it would silently attribute an
     agent's action to the human at the GUI.
     """
-    from cryosoft.core.orchestrator import Orchestrator
+    from i2as.core.orchestrator import Orchestrator
 
     for member in CommandName:
         method = getattr(Orchestrator, member.value)
@@ -3501,7 +3501,7 @@ def test_status_snapshot_answers_every_engine_read() -> None:
     snapshot actually carries every read. Diffed by name, so a new accessor
     lands a field or an entry in ``SNAPSHOT_UNANSWERED_READS`` with a reason.
     """
-    from cryosoft.core.orchestrator import Orchestrator
+    from i2as.core.orchestrator import Orchestrator
 
     reads = {
         name
@@ -3535,7 +3535,7 @@ def test_command_name_values_are_the_method_names() -> None:
     Dispatch is then a lookup rather than a hand-maintained table, which is
     what keeps the two clients' surfaces from drifting apart.
     """
-    from cryosoft.core.orchestrator import Orchestrator
+    from i2as.core.orchestrator import Orchestrator
 
     for member in CommandName:
         method = getattr(Orchestrator, member.value, None)
@@ -3838,7 +3838,7 @@ def test_plan_citation_matcher_flags_a_plan_citation(text: str) -> None:
         "Model 6221 manual §5.2 forbids this command sequence.",
         "§3.11 of the SR830 manual describes the reserve modes.",
         "See ``GLOSSARY.md``'s **Session** for the tier and its layout.",
-        "See ``cryosoft/core/README.md`` for the module rows.",
+        "See ``i2as/core/README.md`` for the module rows.",
         "The Orchestrator dispatches the PhasePlan the procedure returns.",
         "Ramps are generators that yield one step per tick; plan ahead.",
         "self._plan_steps holds the StepPlans already dispatched.",
@@ -3868,7 +3868,7 @@ def test_plan_citation_allowlist_is_empty() -> None:
     )
 
 
-def test_no_plan_document_citation_under_cryosoft() -> None:
+def test_no_plan_document_citation_under_i2as() -> None:
     """No source file or folder README cites a document in docs/plans/.
 
     Plans are dated proposals that get implemented, superseded, and archived;
@@ -3887,14 +3887,14 @@ def test_no_plan_document_citation_under_cryosoft() -> None:
             offenders.append(f"{relative}:{line_number}: {rule} — {excerpt}")
 
     assert not offenders, (
-        "Plan-document citation(s) under cryosoft/ — replace each with the "
+        "Plan-document citation(s) under i2as/ — replace each with the "
         "concept it names, pointing at GLOSSARY.md, the folder README, or the "
         "owning base class:\n" + "\n".join(offenders)
     )
 
 
 def test_no_blocking_sleep_in_gui_sources() -> None:
-    """Nothing under cryosoft/gui/ blocks the Qt event loop with ``time.sleep``.
+    """Nothing under i2as/gui/ blocks the Qt event loop with ``time.sleep``.
 
     The GUI is driven by one QTimer tick on a single thread, so a sleep in a
     widget freezes the window, the tick loop, and every ramp with it. Waiting
@@ -3910,7 +3910,7 @@ def test_no_blocking_sleep_in_gui_sources() -> None:
                 offenders.append(f"{relative}:{line_number}: {line.strip()}")
 
     assert not offenders, (
-        "Blocking sleep(s) under cryosoft/gui/ — the GUI shares its one thread "
+        "Blocking sleep(s) under i2as/gui/ — the GUI shares its one thread "
         "with the tick loop, so express the wait as a tick-driven state "
         "instead:\n" + "\n".join(offenders)
     )
@@ -4097,7 +4097,7 @@ def test_gui_never_reaches_into_the_station_for_a_vi() -> None:
                 offenders.append(f"{relative}:{node.lineno}: get_vi()")
 
     assert not offenders, (
-        "Station.get_vi() called from cryosoft/gui/ — build from the "
+        "Station.get_vi() called from i2as/gui/ — build from the "
         "StationInfo declaration the mirror carries instead:\n"
         + "\n".join(offenders)
     )
@@ -4115,7 +4115,7 @@ def test_the_proxy_exposes_every_command_and_nothing_the_engine_lacks() -> None:
     If this fails on a command you just added: give the proxy a typed method
     of that name, taking the arguments the engine method takes.
     """
-    from cryosoft.core.orchestrator_proxy import OrchestratorProxy
+    from i2as.core.orchestrator_proxy import OrchestratorProxy
 
     declared = {member.value for member in CommandName}
     proxy_methods = {
@@ -4145,8 +4145,8 @@ def test_every_proxy_command_takes_the_engine_methods_arguments() -> None:
     difference: an answer that has to survive a thread boundary cannot be a
     return value.
     """
-    from cryosoft.core.orchestrator import Orchestrator
-    from cryosoft.core.orchestrator_proxy import OrchestratorProxy
+    from i2as.core.orchestrator import Orchestrator
+    from i2as.core.orchestrator_proxy import OrchestratorProxy
 
     mismatches: list[str] = []
     for member in CommandName:
@@ -4186,8 +4186,8 @@ def test_the_proxy_re_exposes_every_engine_signal() -> None:
     """
     from PyQt6.QtCore import pyqtSignal
 
-    from cryosoft.core.orchestrator import Orchestrator
-    from cryosoft.core.orchestrator_proxy import OrchestratorProxy
+    from i2as.core.orchestrator import Orchestrator
+    from i2as.core.orchestrator_proxy import OrchestratorProxy
 
     renamed = {"verdict_emitted": "verdict", "event_emitted": "event"}
     engine_signals = {
@@ -4205,7 +4205,7 @@ def test_the_proxy_re_exposes_every_engine_signal() -> None:
     assert not missing, f"Engine signals the proxy does not re-expose: {sorted(missing)}"
 
 
-#: GUI modules allowed to import ``cryosoft.core.station`` at RUNTIME, and
+#: GUI modules allowed to import ``i2as.core.station`` at RUNTIME, and
 #: what they take from it. It is a pure config-FILE reader that takes no
 #: Station and touches no instrument; it is in that module for historical
 #: reasons and moving it is a separate change. Import contract C19 carries
@@ -4215,7 +4215,7 @@ _RUNTIME_STATION_IMPORTS: dict[str, set[str]] = {
 
 
 def test_gui_imports_the_station_only_for_typing_or_config_helpers() -> None:
-    """C19's other half: a ``cryosoft.core.station`` import under ``gui/`` is
+    """C19's other half: a ``i2as.core.station`` import under ``gui/`` is
     type-only, or the one named config-validation helper.
 
     Import contract C19 forbids the dependency outright and lists the
@@ -4223,7 +4223,7 @@ def test_gui_imports_the_station_only_for_typing_or_config_helpers() -> None:
     inside ``if TYPE_CHECKING:`` like any other, so the contract alone cannot
     express "types are fine". This is the half that can: every ignored import
     must be inside a type-checking guard, unless it is the config helper
-    named above (the YAML-only readers live in ``cryosoft.core.config``,
+    named above (the YAML-only readers live in ``i2as.core.config``,
     which the GUI may import freely).
     """
     offenders: list[str] = []
@@ -4249,7 +4249,7 @@ def test_gui_imports_the_station_only_for_typing_or_config_helpers() -> None:
                     offenders.append(f"{relative}:{node.lineno}: {alias.name}")
 
     assert not offenders, (
-        "Runtime import(s) of cryosoft.core.station under cryosoft/gui/ — put "
+        "Runtime import(s) of i2as.core.station under i2as/gui/ — put "
         "the name behind `if TYPE_CHECKING:` (the GUI holds a Station only as "
         "a type), or add it to _RUNTIME_STATION_IMPORTS and C19's "
         "ignore_imports with its reason:\n" + "\n".join(offenders)
@@ -4281,11 +4281,11 @@ _RUN_SOURCE_METHODS = ("list_columns", "read_slice", "summary_stats", "read_meta
 
 
 def _run_source_classes() -> list[type]:
-    """Every class in cryosoft.core answering the run-source vocabulary."""
-    from cryosoft.core.data_reader import RunSource
+    """Every class in i2as.core answering the run-source vocabulary."""
+    from i2as.core.data_reader import RunSource
 
     found: list[type] = []
-    for mod_info in pkgutil.iter_modules(cryosoft.core.__path__):
+    for mod_info in pkgutil.iter_modules(i2as.core.__path__):
         module = importlib.import_module(f"{PACKAGE}.core.{mod_info.name}")
         found.extend(
             cls
@@ -4311,7 +4311,7 @@ def test_run_source_conformance(source_cls: type) -> None:
     without adapting, which means matching signatures — not merely matching
     method names — plus the `n_points` counter every source reports.
     """
-    from cryosoft.core.data_reader import RunSource
+    from i2as.core.data_reader import RunSource
 
     declared = _public_api(RunSource)
     actual = _public_api(source_cls)
@@ -4351,8 +4351,8 @@ def test_action_class_names_agree_between_the_declaration_and_the_gateway() -> N
     it — if they ever disagree, a control could declare a class no role can
     be granted. This is the check that keeps the two in step.
     """
-    from cryosoft.core.decorators import VALID_ACTION_CLASSES
-    from cryosoft.session.gateway import ActionClass
+    from i2as.core.decorators import VALID_ACTION_CLASSES
+    from i2as.session.gateway import ActionClass
 
     assert set(VALID_ACTION_CLASSES) == {member.value for member in ActionClass}
 
@@ -4370,7 +4370,7 @@ def test_every_control_declares_its_action_class(vi_cls: type) -> None:
     it in the open. The undeclared marker is `None`, distinct from an
     explicit `action_class="run_control"`.
     """
-    from cryosoft.core.decorators import VALID_ACTION_CLASSES
+    from i2as.core.decorators import VALID_ACTION_CLASSES
 
     undeclared: list[str] = []
     for method_name, method in _control_methods(vi_cls).items():
@@ -4395,7 +4395,7 @@ def test_every_action_class_row_carries_a_rationale() -> None:
     A `@control`'s class comes from its own declaration, so the only tables
     left are the engine's command surface and the two lifecycle actions.
     """
-    from cryosoft.session.gateway import (
+    from i2as.session.gateway import (
         COMMAND_ACTION_CLASSES,
         LIFECYCLE_ACTION_CLASSES,
     )
@@ -4416,7 +4416,7 @@ def test_every_command_name_has_an_action_class() -> None:
     `SUBMIT_VI_ACTION` is the one deliberate absence — its class depends on
     the capability it targets, so it is resolved per-control instead.
     """
-    from cryosoft.session.gateway import COMMAND_ACTION_CLASSES
+    from i2as.session.gateway import COMMAND_ACTION_CLASSES
 
     declared = {member for member in CommandName} - {CommandName.SUBMIT_VI_ACTION}
     classified = set(COMMAND_ACTION_CLASSES)
@@ -4440,8 +4440,8 @@ def test_the_owner_scoped_command_set_is_the_same_on_both_sides() -> None:
     session layer off the engine's internals for this purpose), so the two
     are written down twice and matched here.
     """
-    from cryosoft.core.orchestrator import OWNER_SCOPED_COMMANDS as engine_set
-    from cryosoft.session.gateway.roles import OWNER_SCOPED_COMMANDS as gateway_set
+    from i2as.core.orchestrator import OWNER_SCOPED_COMMANDS as engine_set
+    from i2as.session.gateway.roles import OWNER_SCOPED_COMMANDS as gateway_set
 
     assert {member.value for member in gateway_set} == set(engine_set)
     assert {member.value for member in gateway_set} <= {
@@ -4456,8 +4456,8 @@ def test_every_owner_scoped_command_publishes_the_override_arguments() -> None:
     tool whose schema is closed against those two arguments would make the
     instruction impossible to follow.
     """
-    from cryosoft.session.gateway.roles import OWNER_SCOPED_COMMANDS
-    from cryosoft.session.gateway.tools import command_tool_spec
+    from i2as.session.gateway.roles import OWNER_SCOPED_COMMANDS
+    from i2as.session.gateway.tools import command_tool_spec
 
     for member in OWNER_SCOPED_COMMANDS:
         schema = command_tool_spec(member).input_schema
@@ -4472,7 +4472,7 @@ def test_every_owner_scoped_command_publishes_the_override_arguments() -> None:
 
 def test_permission_matrix_has_a_cell_for_every_class_and_role() -> None:
     """Authority is never absent by omission — every (class, role) pair decided."""
-    from cryosoft.session.gateway import PERMISSION_MATRIX, ActionClass, Role
+    from i2as.session.gateway import PERMISSION_MATRIX, ActionClass, Role
 
     assert set(PERMISSION_MATRIX) == set(ActionClass), (
         f"PERMISSION_MATRIX rows do not match ActionClass: "
@@ -4508,7 +4508,7 @@ def test_every_command_name_has_a_tool() -> None:
     `SUBMIT_VI_ACTION` is the one deliberate absence — it is rendered once per
     capability instead, which is what the check below diffs.
     """
-    from cryosoft.session.gateway import render_command_tools
+    from i2as.session.gateway import render_command_tools
 
     rendered = {tool.name for tool in render_command_tools()}
     declared = {
@@ -4529,7 +4529,7 @@ def test_every_command_name_has_a_tool() -> None:
 
 def test_every_command_tool_wraps_its_own_command() -> None:
     """A command tool's name IS its command's value, so routing is a lookup."""
-    from cryosoft.session.gateway import render_command_tools
+    from i2as.session.gateway import render_command_tools
 
     for tool in render_command_tools():
         assert tool.command is not None, f"{tool.name} is not a command tool"
@@ -4550,7 +4550,7 @@ def test_every_manifest_control_has_a_tool(config_dir: Path) -> None:
     an instrument an agent can see but not use; a tool with no manifest entry
     is a call into something the station does not declare.
     """
-    from cryosoft.session.gateway import capability_tool_name, render_tools
+    from i2as.session.gateway import capability_tool_name, render_tools
 
     station = build_station(str(config_dir))
     declared = {
@@ -4583,7 +4583,7 @@ def test_every_tool_publishes_a_closed_json_safe_schema(config_dir: Path) -> Non
     schema left open would silently drop an argument an agent believed it had
     supplied.
     """
-    from cryosoft.session.gateway import render_tools
+    from i2as.session.gateway import render_tools
 
     tools = render_tools(build_station(str(config_dir)).station_info())
     names = [tool.name for tool in tools]
@@ -4619,8 +4619,8 @@ def test_every_session_tool_has_an_implementation_and_a_class() -> None:
     is a promise the surface cannot keep, and an orphan implementation is dead
     code nobody can reach.
     """
-    from cryosoft.session.gateway import SESSION_TOOLS, ActionClass
-    from cryosoft.session.gateway.tools import SESSION_TOOL_FUNCTIONS
+    from i2as.session.gateway import SESSION_TOOLS, ActionClass
+    from i2as.session.gateway.tools import SESSION_TOOL_FUNCTIONS
 
     declared = {tool.session_function for tool in SESSION_TOOLS if not tool.is_command}
     implemented = set(SESSION_TOOL_FUNCTIONS)
@@ -4709,20 +4709,20 @@ def test_clients_call_only_pure_declaration_reads_on_the_station() -> None:
                 offenders.append(f"{relative}:{node.lineno}: {node.func.attr}()")
 
     assert not offenders, (
-        "Station call(s) from cryosoft/gui/ or cryosoft/session/ that are not "
+        "Station call(s) from i2as/gui/ or i2as/session/ that are not "
         "pure declaration reads — the Station lives on the instrument thread, "
         "so read this off the StationInfo declaration or the StatusMirror "
         "instead:\n" + "\n".join(offenders)
     )
 
 
-# ── Analysis recipe standard (cryosoft/analysis/) ────────────────────────────
-# The recipe contract written at the top of cryosoft/analysis/base.py: one
+# ── Analysis recipe standard (i2as/analysis/) ────────────────────────────
+# The recipe contract written at the top of i2as/analysis/base.py: one
 # class per recipe declaring a snake_case name, a non-empty one-line
 # description and a procedures tuple, implementing analyse(run, context) with
 # the contract's signature, instantiated with no arguments, and returning one
 # ok AnalysisReport for a real run file. A recipe module added to
-# cryosoft/analysis/recipes/ is covered the moment the file exists — that is
+# i2as/analysis/recipes/ is covered the moment the file exists — that is
 # what discovery buys, exactly as it does for drivers, VIs and procedures.
 
 _ANALYSIS_DATA_CONFIG = {
@@ -4747,8 +4747,8 @@ _ANALYSIS_MANIFEST = {
 
 
 def _package_recipe_infos() -> list:
-    """Every recipe shipped in cryosoft/analysis/recipes/."""
-    from cryosoft.analysis.discovery import ORIGIN_PACKAGE, discover_recipes
+    """Every recipe shipped in i2as/analysis/recipes/."""
+    from i2as.analysis.discovery import ORIGIN_PACKAGE, discover_recipes
 
     return [info for info in discover_recipes() if info.origin == ORIGIN_PACKAGE]
 
@@ -4763,7 +4763,7 @@ def _synthetic_run_file(directory: Path) -> Path:
         Path of the closed HDF5 file: three sweep points of one axis, one
         system read-back and one measured scalar.
     """
-    from cryosoft.core.data_manager import DataManager
+    from i2as.core.data_manager import DataManager
 
     writer = DataManager(
         data_directory=str(directory),
@@ -4816,8 +4816,8 @@ def test_analysis_recipe_declares_the_contract(info) -> None:
 @pytest.mark.parametrize("info", _package_recipe_infos(), ids=lambda i: i.name)
 def test_analysis_recipe_analyse_matches_the_contract_signature(info) -> None:
     """analyse(self, run, context) — no extra argument, none missing."""
-    from cryosoft.analysis.base import AnalysisRecipe
-    from cryosoft.analysis.discovery import load_recipe
+    from i2as.analysis.base import AnalysisRecipe
+    from i2as.analysis.discovery import load_recipe
 
     recipe = load_recipe(info)  # constructed with no arguments, per the contract
     assert isinstance(recipe, AnalysisRecipe)
@@ -4833,8 +4833,8 @@ def test_analysis_recipe_analyse_matches_the_contract_signature(info) -> None:
 @pytest.mark.parametrize("info", _package_recipe_infos(), ids=lambda i: i.name)
 def test_analysis_recipe_runs_to_an_ok_report(info, tmp_path) -> None:
     """Every shipped recipe answers a real run file with an ok report."""
-    from cryosoft.analysis.report import REPORT_OK, AnalysisSpec
-    from cryosoft.analysis.runner import run_spec
+    from i2as.analysis.report import REPORT_OK, AnalysisSpec
+    from i2as.analysis.runner import run_spec
 
     run_file = _synthetic_run_file(tmp_path / "data")
     report = run_spec(
@@ -4862,7 +4862,7 @@ def test_analysis_recipe_runs_to_an_ok_report(info, tmp_path) -> None:
 
 
 # ── Folder README standard (CLAUDE.md) ───────────────────────────────────────
-# Every functional folder under cryosoft/ carries a README.md with the seven
+# Every functional folder under i2as/ carries a README.md with the seven
 # canonical sections. Auto-discovered, so a NEW package folder is covered the
 # moment its README exists — and a folder that adds a README without the
 # standard's sections fails here rather than drifting.
@@ -4883,7 +4883,7 @@ README_SECTIONS: tuple[str, ...] = (
 
 
 def _folder_readmes() -> list[Path]:
-    """Every folder README under cryosoft/."""
+    """Every folder README under i2as/."""
     return sorted(PACKAGE_DIR.rglob("README.md"))
 
 

@@ -3,12 +3,12 @@ from pathlib import Path
 from typing import ClassVar
 
 import pytest
-from cryosoft.core.conditions import Condition
-from cryosoft.core.decorators import monitored
-from cryosoft.core.exceptions import CryoSoftCommunicationError
-from cryosoft.core.plan import Target
-from cryosoft.core.station import Station, build_station
-from cryosoft.virtual_instruments.base import BaseVirtualInstrument
+from i2as.core.conditions import Condition
+from i2as.core.decorators import monitored
+from i2as.core.exceptions import I2ASCommunicationError
+from i2as.core.plan import Target
+from i2as.core.station import Station, build_station
+from i2as.virtual_instruments.base import BaseVirtualInstrument
 
 
 class _AddressCapturingDriver:
@@ -28,7 +28,7 @@ class _AddressCapturingDriver:
         return {}
 
     def get_idn(self) -> str:
-        return "CRYOSOFT,ADDRESS-CAPTURING-STUB,0,0"
+        return "I2AS,ADDRESS-CAPTURING-STUB,0,0"
 
     def close(self) -> None:
         self.closed = True
@@ -37,7 +37,7 @@ class _AddressCapturingDriver:
 @pytest.fixture
 def sim_station():
     """Fixture to build a Station from the sim_cryostat configuration."""
-    config_path = Path(__file__).parent.parent / "cryosoft" / "configs" / "sim_cryostat"
+    config_path = Path(__file__).parent.parent / "i2as" / "configs" / "sim_cryostat"
     return build_station(str(config_path))
 
 
@@ -66,7 +66,7 @@ def test_build_station_passes_address_to_driver(tmp_path):
 
 def test_read_panels_config_well_formed(tmp_path):
     """read_panels_config returns per-VI control allowlists from monitor.yaml."""
-    from cryosoft.core.config import read_panels_config
+    from i2as.core.config import read_panels_config
 
     (tmp_path / "monitor.yaml").write_text(
         "monitor:\n  tick_interval_ms: 1000\n"
@@ -84,7 +84,7 @@ def test_read_panels_config_well_formed(tmp_path):
 
 def test_read_panels_config_tolerates_absent_or_malformed(tmp_path):
     """Absent block, malformed entries, or a missing file yield {} / skip, never raise."""
-    from cryosoft.core.config import read_panels_config
+    from i2as.core.config import read_panels_config
 
     # No monitor.yaml at all.
     assert read_panels_config(str(tmp_path / "nowhere")) == {}
@@ -105,14 +105,14 @@ def test_read_panels_config_tolerates_absent_or_malformed(tmp_path):
 
 
 def test_read_tick_interval_ms_reads_the_configured_value(tmp_path):
-    from cryosoft.core.config import read_tick_interval_ms
+    from i2as.core.config import read_tick_interval_ms
 
     (tmp_path / "monitor.yaml").write_text("monitor:\n  tick_interval_ms: 1000\n")
     assert read_tick_interval_ms(str(tmp_path)) == 1000
 
 
 def test_read_tick_interval_ms_defaults_when_absent_or_missing(tmp_path):
-    from cryosoft.core.config import read_tick_interval_ms
+    from i2as.core.config import read_tick_interval_ms
 
     # No monitor.yaml at all.
     assert read_tick_interval_ms(str(tmp_path / "nowhere")) == 3000
@@ -122,7 +122,7 @@ def test_read_tick_interval_ms_defaults_when_absent_or_missing(tmp_path):
 
 
 def test_build_station_success(sim_station: Station):
-    """build_station('cryosoft/configs/sim_cryostat') works without errors."""
+    """build_station('i2as/configs/sim_cryostat') works without errors."""
     assert sim_station is not None
     # Check that expected VIs are registered
     vi_names = sim_station.get_vi_names()
@@ -530,7 +530,7 @@ def test_retry_fault_disconnected_rebuilds_the_driver_session(sim_station: Stati
 
 # ---------------------------------------------------------------------------
 # Unified condition registry (the System-Condition standard, see
-# cryosoft/core/conditions.py and GLOSSARY.md) — Station.conditions() and
+# i2as/core/conditions.py and GLOSSARY.md) — Station.conditions() and
 # the transitional vi_faults()/vi_safety_holds() adapters over it.
 # ---------------------------------------------------------------------------
 
@@ -675,7 +675,7 @@ def test_update_conditions_clearing_tolerance_recreates_with_fresh_since(
     safety = station.check_safety()
     assert safety["coolant_low"] is True
 
-    import cryosoft.core.station as station_module
+    import i2as.core.station as station_module
 
     clock = iter([100.0, 200.0, 300.0])
     monkeypatch.setattr(station_module.time, "time", lambda: next(clock))
@@ -780,7 +780,7 @@ def test_update_conditions_warns_once_for_unconsumed_hold_flag(caplog: pytest.Lo
     safety = station.check_safety()
     assert safety == {"widget_stuck": True}
 
-    with caplog.at_level(logging.WARNING, logger="cryosoft.core.station"):
+    with caplog.at_level(logging.WARNING, logger="i2as.core.station"):
         station.update_conditions(safety, tolerated_flags=frozenset())
         station.update_conditions(safety, tolerated_flags=frozenset())
 
@@ -869,9 +869,9 @@ class _UnreachableDriver:
     """Test double for a driver whose instrument never answers."""
 
     def __init__(self, resource_string: str) -> None:
-        from cryosoft.core.exceptions import CryoSoftCommunicationError
+        from i2as.core.exceptions import I2ASCommunicationError
 
-        raise CryoSoftCommunicationError(
+        raise I2ASCommunicationError(
             f"Cannot open instrument at {resource_string}"
         )
 
@@ -888,17 +888,17 @@ class _FlakyDriver:
     attempts: int = 0
 
     def __init__(self, resource_string: str) -> None:
-        from cryosoft.core.exceptions import CryoSoftCommunicationError
+        from i2as.core.exceptions import I2ASCommunicationError
 
         type(self).attempts += 1
         if type(self).attempts <= type(self).fail_times:
-            raise CryoSoftCommunicationError(
+            raise I2ASCommunicationError(
                 f"Cannot open instrument at {resource_string}"
             )
         self.closed = False
 
     def get_idn(self) -> str:
-        return "CRYOSOFT,FLAKY-STUB,0,0"
+        return "I2AS,FLAKY-STUB,0,0"
 
     def close(self) -> None:
         self.closed = True
@@ -922,9 +922,9 @@ class _CommFailVI(_StubVI):
     """VI test double whose own bring-up cannot talk to the hardware."""
 
     def __init__(self, drivers: dict, **init_params) -> None:
-        from cryosoft.core.exceptions import CryoSoftCommunicationError
+        from i2as.core.exceptions import I2ASCommunicationError
 
-        raise CryoSoftCommunicationError("VI bring-up query got no response")
+        raise I2ASCommunicationError("VI bring-up query got no response")
 
 
 def _write_degraded_config(
@@ -991,7 +991,7 @@ def test_build_station_degrades_on_vi_communication_error(tmp_path):
 
 def test_build_station_still_raises_on_unknown_driver_reference(tmp_path):
     """Config errors must still abort the build (they are not connection faults)."""
-    from cryosoft.core.exceptions import CryoSoftConfigError
+    from i2as.core.exceptions import I2ASConfigError
 
     (tmp_path / "devices.yaml").write_text(
         "real_drivers: {}\n"
@@ -1002,19 +1002,19 @@ def test_build_station_still_raises_on_unknown_driver_reference(tmp_path):
     )
     (tmp_path / "monitor.yaml").write_text("monitor:\n  tick_interval_ms: 1000\n")
 
-    with pytest.raises(CryoSoftConfigError, match="no_such_driver"):
+    with pytest.raises(I2ASConfigError, match="no_such_driver"):
         build_station(str(tmp_path))
 
 
 def test_fallback_keeps_config_with_unreachable_instrument(tmp_path):
     """An unreachable instrument must NOT trigger the config fallback chain."""
-    from cryosoft.core.station import build_station_with_fallback
+    from i2as.core.station import build_station_with_fallback
 
     real_cfg = tmp_path / "real"
     real_cfg.mkdir()
     _write_degraded_config(real_cfg, "tests.test_l2_station._UnreachableDriver")
     sim_cfg = str(
-        Path(__file__).parent.parent / "cryosoft" / "configs" / "sim_cryostat"
+        Path(__file__).parent.parent / "i2as" / "configs" / "sim_cryostat"
     )
 
     station, used_path, warnings = build_station_with_fallback(
@@ -1086,12 +1086,12 @@ class _ToggleableCommDriver:
 
     def get_idn(self) -> str:
         if type(self).broken:
-            raise CryoSoftCommunicationError("bus session is dead")
-        return "CRYOSOFT,TOGGLE-STUB,0,0"
+            raise I2ASCommunicationError("bus session is dead")
+        return "I2AS,TOGGLE-STUB,0,0"
 
     def get_reading(self) -> float:
         if type(self).broken:
-            raise CryoSoftCommunicationError("bus session is dead")
+            raise I2ASCommunicationError("bus session is dead")
         return 1.0
 
     def close(self) -> None:
@@ -1149,7 +1149,7 @@ def test_retry_fault_disconnected_stays_faulted_while_hardware_is_still_broken(
 
 
 # ---------------------------------------------------------------------------
-# The Availability standard (cryosoft.core.availability): Station.availability()
+# The Availability standard (i2as.core.availability): Station.availability()
 # / availabilities() as a derived view over the offline registry, the unified
 # condition registry, and the VI's own attachment state.
 # ---------------------------------------------------------------------------
@@ -1168,17 +1168,17 @@ class _SucceedsOnceDriver:
     attempts: int = 0
 
     def __init__(self, resource_string: str) -> None:
-        from cryosoft.core.exceptions import CryoSoftCommunicationError
+        from i2as.core.exceptions import I2ASCommunicationError
 
         type(self).attempts += 1
         if type(self).attempts > 1:
-            raise CryoSoftCommunicationError(
+            raise I2ASCommunicationError(
                 f"Cannot open instrument at {resource_string}"
             )
         self.closed = False
 
     def get_idn(self) -> str:
-        return "CRYOSOFT,SUCCEEDS-ONCE-STUB,0,0"
+        return "I2AS,SUCCEEDS-ONCE-STUB,0,0"
 
     def close(self) -> None:
         self.closed = True
@@ -1254,7 +1254,7 @@ def test_availability_failed_reconnect_of_operator_disconnected_vi_adds_connect_
 
 def test_read_gateway_config_reads_the_declared_values(tmp_path):
     """A setup that opens itself to agents says so in its own monitor.yaml."""
-    from cryosoft.core.config import read_gateway_config
+    from i2as.core.config import read_gateway_config
 
     (tmp_path / "monitor.yaml").write_text(
         "monitor:\n"
@@ -1274,7 +1274,7 @@ def test_read_gateway_config_reads_the_declared_values(tmp_path):
 
 def test_read_gateway_config_defaults_to_the_closed_door(tmp_path):
     """Absent, malformed or unreadable all mean off — never raises."""
-    from cryosoft.core.config import read_gateway_config
+    from i2as.core.config import read_gateway_config
 
     closed = {"gateway_server": False, "gateway_max_role": "observer"}
     assert read_gateway_config(str(tmp_path / "nowhere")) == closed
@@ -1290,7 +1290,7 @@ def test_read_instrument_thread_defaults_to_the_thread(tmp_path):
     Absent, malformed or unreadable all inherit it too — the fallback of a
     file nobody can read must be the shape every other setup runs in.
     """
-    from cryosoft.core.config import read_instrument_thread
+    from i2as.core.config import read_instrument_thread
 
     assert read_instrument_thread(str(tmp_path / "nowhere")) is True
     (tmp_path / "monitor.yaml").write_text("monitor:\n  tick_interval_ms: 1000\n")
@@ -1301,7 +1301,7 @@ def test_read_instrument_thread_defaults_to_the_thread(tmp_path):
 
 def test_read_instrument_thread_honours_a_deliberate_refusal(tmp_path):
     """A setup that wants the temporary inline mode back says so explicitly."""
-    from cryosoft.core.config import read_instrument_thread
+    from i2as.core.config import read_instrument_thread
 
     (tmp_path / "monitor.yaml").write_text(
         "monitor:\n  tick_interval_ms: 1000\n  instrument_thread: false\n"

@@ -1,4 +1,4 @@
-"""Tests for the CryoSoft installation-path resolver."""
+"""Tests for the I2AS installation-path resolver."""
 
 from __future__ import annotations
 
@@ -8,18 +8,18 @@ from types import SimpleNamespace
 
 import pytest
 
-from cryosoft.core import paths
+from i2as.core import paths
 
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every test starts with a clean slate for the resolver's env inputs."""
-    monkeypatch.delenv("CRYOSOFT_LOG_DIR", raising=False)
+    monkeypatch.delenv("I2AS_LOG_DIR", raising=False)
     monkeypatch.delenv("LOCALAPPDATA", raising=False)
     monkeypatch.delenv("APPDATA", raising=False)
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     monkeypatch.delenv("XDG_STATE_HOME", raising=False)
-    monkeypatch.delenv("CRYOSOFT_MEASUREMENT_ROOT", raising=False)
+    monkeypatch.delenv("I2AS_MEASUREMENT_ROOT", raising=False)
 
 
 def _pretend_platform(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
@@ -47,18 +47,18 @@ def _pretend_platform(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
 def test_log_directory_honours_explicit_env_var(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("CRYOSOFT_LOG_DIR", str(tmp_path / "custom_logs"))
+    monkeypatch.setenv("I2AS_LOG_DIR", str(tmp_path / "custom_logs"))
     assert paths.log_directory() == tmp_path / "custom_logs"
 
 
 def test_log_directory_empty_env_var_is_treated_as_unset(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("CRYOSOFT_LOG_DIR", "")
+    monkeypatch.setenv("I2AS_LOG_DIR", "")
     _pretend_platform(monkeypatch, "nt")
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "AppData" / "Local"))
     result = paths.log_directory()
-    assert result == tmp_path / "AppData" / "Local" / "CryoSoft" / "logs"
+    assert result == tmp_path / "AppData" / "Local" / "I2AS" / "logs"
 
 
 def test_log_directory_windows_uses_localappdata(
@@ -67,7 +67,7 @@ def test_log_directory_windows_uses_localappdata(
     _pretend_platform(monkeypatch, "nt")
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "AppData" / "Local"))
     result = paths.log_directory()
-    assert result == tmp_path / "AppData" / "Local" / "CryoSoft" / "logs"
+    assert result == tmp_path / "AppData" / "Local" / "I2AS" / "logs"
 
 
 def test_log_directory_windows_without_localappdata_falls_back_to_xdg_shape(
@@ -79,7 +79,7 @@ def test_log_directory_windows_without_localappdata_falls_back_to_xdg_shape(
     _pretend_platform(monkeypatch, "nt")
     monkeypatch.delenv("LOCALAPPDATA", raising=False)
     result = paths.log_directory()
-    assert result == fake_home / ".local" / "state" / "cryosoft" / "logs"
+    assert result == fake_home / ".local" / "state" / "i2as" / "logs"
 
 
 def test_log_directory_posix_uses_xdg_style_state_dir(
@@ -91,7 +91,7 @@ def test_log_directory_posix_uses_xdg_style_state_dir(
     monkeypatch.setattr(paths.Path, "home", staticmethod(lambda: fake_home))
     _pretend_platform(monkeypatch, "posix")
     result = paths.log_directory()
-    assert result == fake_home / ".local" / "state" / "cryosoft" / "logs"
+    assert result == fake_home / ".local" / "state" / "i2as" / "logs"
 
 
 def test_log_directory_is_the_state_root_plus_logs(
@@ -110,7 +110,7 @@ def test_user_config_dir_windows_uses_appdata(
 ) -> None:
     _pretend_platform(monkeypatch, "nt")
     monkeypatch.setenv("APPDATA", str(tmp_path / "AppData" / "Roaming"))
-    assert paths.user_config_dir() == tmp_path / "AppData" / "Roaming" / "CryoSoft"
+    assert paths.user_config_dir() == tmp_path / "AppData" / "Roaming" / "I2AS"
 
 
 def test_user_config_dir_windows_without_appdata_falls_back_to_xdg_shape(
@@ -119,7 +119,7 @@ def test_user_config_dir_windows_without_appdata_falls_back_to_xdg_shape(
     fake_home = tmp_path / "home" / "fakeuser"
     monkeypatch.setattr(paths.Path, "home", staticmethod(lambda: fake_home))
     _pretend_platform(monkeypatch, "nt")
-    assert paths.user_config_dir() == fake_home / ".config" / "cryosoft"
+    assert paths.user_config_dir() == fake_home / ".config" / "i2as"
 
 
 def test_user_config_dir_posix_default(
@@ -128,7 +128,7 @@ def test_user_config_dir_posix_default(
     fake_home = tmp_path / "home" / "fakeuser"
     monkeypatch.setattr(paths.Path, "home", staticmethod(lambda: fake_home))
     _pretend_platform(monkeypatch, "posix")
-    assert paths.user_config_dir() == fake_home / ".config" / "cryosoft"
+    assert paths.user_config_dir() == fake_home / ".config" / "i2as"
 
 
 def test_user_config_dir_posix_honours_xdg_config_home(
@@ -136,7 +136,7 @@ def test_user_config_dir_posix_honours_xdg_config_home(
 ) -> None:
     _pretend_platform(monkeypatch, "posix")
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
-    assert paths.user_config_dir() == tmp_path / "xdg-config" / "cryosoft"
+    assert paths.user_config_dir() == tmp_path / "xdg-config" / "i2as"
 
 
 def test_user_config_dir_empty_xdg_var_is_treated_as_unset(
@@ -146,7 +146,7 @@ def test_user_config_dir_empty_xdg_var_is_treated_as_unset(
     monkeypatch.setattr(paths.Path, "home", staticmethod(lambda: fake_home))
     _pretend_platform(monkeypatch, "posix")
     monkeypatch.setenv("XDG_CONFIG_HOME", "")
-    assert paths.user_config_dir() == fake_home / ".config" / "cryosoft"
+    assert paths.user_config_dir() == fake_home / ".config" / "i2as"
 
 
 def test_user_state_dir_windows_uses_localappdata(
@@ -154,7 +154,7 @@ def test_user_state_dir_windows_uses_localappdata(
 ) -> None:
     _pretend_platform(monkeypatch, "nt")
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "AppData" / "Local"))
-    assert paths.user_state_dir() == tmp_path / "AppData" / "Local" / "CryoSoft"
+    assert paths.user_state_dir() == tmp_path / "AppData" / "Local" / "I2AS"
 
 
 def test_user_state_dir_posix_default_and_xdg_override(
@@ -163,9 +163,9 @@ def test_user_state_dir_posix_default_and_xdg_override(
     fake_home = tmp_path / "home" / "fakeuser"
     monkeypatch.setattr(paths.Path, "home", staticmethod(lambda: fake_home))
     _pretend_platform(monkeypatch, "posix")
-    assert paths.user_state_dir() == fake_home / ".local" / "state" / "cryosoft"
+    assert paths.user_state_dir() == fake_home / ".local" / "state" / "i2as"
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-state"))
-    assert paths.user_state_dir() == tmp_path / "xdg-state" / "cryosoft"
+    assert paths.user_state_dir() == tmp_path / "xdg-state" / "i2as"
 
 
 def test_user_dirs_create_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -180,7 +180,7 @@ def test_log_directory_creates_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fresh = tmp_path / "does_not_exist_yet" / "logs"
-    monkeypatch.setenv("CRYOSOFT_LOG_DIR", str(fresh))
+    monkeypatch.setenv("I2AS_LOG_DIR", str(fresh))
     result = paths.log_directory()
     assert result == fresh
     assert not result.exists()
@@ -189,7 +189,7 @@ def test_log_directory_creates_nothing(
 def test_measurement_root_honours_explicit_env_var(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("CRYOSOFT_MEASUREMENT_ROOT", str(tmp_path / "measurements"))
+    monkeypatch.setenv("I2AS_MEASUREMENT_ROOT", str(tmp_path / "measurements"))
     # Point the settings file at a nonexistent path so a stray real
     # App-config.yaml on the host machine can never leak into this test.
     monkeypatch.setattr(
@@ -201,7 +201,7 @@ def test_measurement_root_honours_explicit_env_var(
 def test_measurement_root_env_var_wins_over_settings_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("CRYOSOFT_MEASUREMENT_ROOT", str(tmp_path / "from_env"))
+    monkeypatch.setenv("I2AS_MEASUREMENT_ROOT", str(tmp_path / "from_env"))
     monkeypatch.setattr(
         paths, "_read_measurement_root_setting", lambda config_path: str(tmp_path / "from_file")
     )
@@ -228,7 +228,7 @@ def test_measurement_root_missing_settings_file_raises(
     monkeypatch.setattr(paths, "_app_config_path", lambda: config_path)
     with pytest.raises(RuntimeError) as excinfo:
         paths.measurement_root()
-    assert "CRYOSOFT_MEASUREMENT_ROOT" in str(excinfo.value)
+    assert "I2AS_MEASUREMENT_ROOT" in str(excinfo.value)
     assert str(config_path) in str(excinfo.value)
 
 
@@ -263,11 +263,11 @@ def test_read_measurement_root_setting_ignores_comments_and_other_keys(
 ) -> None:
     config_path = tmp_path / "App-config.yaml"
     config_path.write_text(
-        "# machine settings\nsome_key: 1\nmeasurement_root: /data/cryosoft\n",
+        "# machine settings\nsome_key: 1\nmeasurement_root: /data/i2as\n",
         encoding="utf-8",
     )
     assert (
-        paths._read_measurement_root_setting(config_path) == "/data/cryosoft"
+        paths._read_measurement_root_setting(config_path) == "/data/i2as"
     )
 
 
@@ -275,7 +275,7 @@ def test_measurement_root_creates_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fresh = tmp_path / "does_not_exist_yet" / "measurements"
-    monkeypatch.setenv("CRYOSOFT_MEASUREMENT_ROOT", str(fresh))
+    monkeypatch.setenv("I2AS_MEASUREMENT_ROOT", str(fresh))
     monkeypatch.setattr(
         paths, "_app_config_path", lambda: tmp_path / "does_not_exist.yaml"
     )

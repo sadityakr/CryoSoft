@@ -1,4 +1,4 @@
-"""Tests for CryoSoft logging setup."""
+"""Tests for I2AS logging setup."""
 
 from __future__ import annotations
 
@@ -8,33 +8,33 @@ from pathlib import Path
 
 import pytest
 
-from cryosoft.core import logging_config
+from i2as.core import logging_config
 
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every test starts with a clean slate for the resolver's env inputs."""
-    monkeypatch.delenv("CRYOSOFT_LOG_DIR", raising=False)
+    monkeypatch.delenv("I2AS_LOG_DIR", raising=False)
     monkeypatch.delenv("LOCALAPPDATA", raising=False)
 
 
 _JSONL_LOGGER_NAMES = (
-    "cryosoft.status",
-    "cryosoft.trend_raw",
-    "cryosoft.trend_3min",
-    "cryosoft.trend_hourly",
+    "i2as.status",
+    "i2as.trend_raw",
+    "i2as.trend_3min",
+    "i2as.trend_hourly",
 )
 
 
 def test_setup_logging_honours_explicit_log_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # A stray CRYOSOFT_LOG_DIR must never override an explicit argument.
-    monkeypatch.setenv("CRYOSOFT_LOG_DIR", str(tmp_path / "should_not_be_used"))
+    # A stray I2AS_LOG_DIR must never override an explicit argument.
+    monkeypatch.setenv("I2AS_LOG_DIR", str(tmp_path / "should_not_be_used"))
 
     # Fresh loggers so repeated test-suite calls to setup_logging() elsewhere
     # don't short-circuit this one via the idempotency guards.
-    for name in ("cryosoft", "cryosoft.status"):
+    for name in ("i2as", "i2as.status"):
         logger = logging.getLogger(name)
         logger.handlers.clear()
 
@@ -42,11 +42,11 @@ def test_setup_logging_honours_explicit_log_dir(
     logging_config.setup_logging(log_dir=explicit_dir)
 
     assert explicit_dir.exists()
-    assert (explicit_dir / "cryosoft.log").exists()
+    assert (explicit_dir / "i2as.log").exists()
     assert not (tmp_path / "should_not_be_used").exists()
 
     # Clean up handlers so later tests in the suite get a fresh setup_logging().
-    for name in ("cryosoft", "cryosoft.status"):
+    for name in ("i2as", "i2as.status"):
         logger = logging.getLogger(name)
         for handler in list(logger.handlers):
             handler.close()
@@ -60,7 +60,7 @@ def _clear_jsonl_loggers() -> None:
     ``setup_logging()`` call, unaffected by idempotency guards tripped by
     other tests or by import-time side effects elsewhere in the suite.
     """
-    for name in ("cryosoft", *_JSONL_LOGGER_NAMES):
+    for name in ("i2as", *_JSONL_LOGGER_NAMES):
         logger = logging.getLogger(name)
         for handler in list(logger.handlers):
             handler.close()
@@ -77,14 +77,14 @@ def _fresh_jsonl_loggers():
 def _jsonl_handlers(name: str) -> list[logging.handlers.TimedRotatingFileHandler]:
     """Return only the stream handlers ``setup_logging()`` installed on ``name``.
 
-    The full ``logger.handlers`` list is not CryoSoft's alone: pytest attaches
+    The full ``logger.handlers`` list is not I2AS's alone: pytest attaches
     its own capture handlers to exactly these four loggers, precisely because
     they set ``propagate=False`` and would otherwise be invisible to ``caplog``.
     Asserting on that list pins the test runner's internals rather than the
     behaviour under test, and breaks whenever the runner changes them.
 
     Args:
-        name: Logger name, e.g. ``"cryosoft.status"``.
+        name: Logger name, e.g. ``"i2as.status"``.
 
     Returns:
         The logger's timed-rotating file handlers, in attachment order.
@@ -99,14 +99,14 @@ def _jsonl_handlers(name: str) -> list[logging.handlers.TimedRotatingFileHandler
 def test_jsonl_handlers_are_timed_rotating_with_expected_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _fresh_jsonl_loggers: None
 ) -> None:
-    monkeypatch.setenv("CRYOSOFT_LOG_DIR", str(tmp_path / "unused"))
+    monkeypatch.setenv("I2AS_LOG_DIR", str(tmp_path / "unused"))
     logging_config.setup_logging(log_dir=tmp_path / "logs")
 
     expected = {
-        "cryosoft.status": ("midnight", 7),
-        "cryosoft.trend_raw": ("midnight", 2),
-        "cryosoft.trend_3min": ("midnight", 8),
-        "cryosoft.trend_hourly": ("W0", 53),
+        "i2as.status": ("midnight", 7),
+        "i2as.trend_raw": ("midnight", 2),
+        "i2as.trend_3min": ("midnight", 8),
+        "i2as.trend_hourly": ("W0", 53),
     }
 
     for name, (when, backup_count) in expected.items():
@@ -130,10 +130,10 @@ def test_jsonl_handlers_write_expected_filenames(
     logging_config.setup_logging(log_dir=log_dir)
 
     expected_files = {
-        "cryosoft.status": "status.jsonl",
-        "cryosoft.trend_raw": "trend_history_raw.jsonl",
-        "cryosoft.trend_3min": "trend_history_3min.jsonl",
-        "cryosoft.trend_hourly": "trend_history_hourly.jsonl",
+        "i2as.status": "status.jsonl",
+        "i2as.trend_raw": "trend_history_raw.jsonl",
+        "i2as.trend_3min": "trend_history_3min.jsonl",
+        "i2as.trend_hourly": "trend_history_hourly.jsonl",
     }
     for name, filename in expected_files.items():
         handlers = _jsonl_handlers(name)
@@ -155,7 +155,7 @@ def test_setup_logging_twice_does_not_duplicate_jsonl_handlers(
 def test_foreign_handler_does_not_suppress_the_jsonl_writer(
     tmp_path: Path, _fresh_jsonl_loggers: None
 ) -> None:
-    """A handler attached by something else must not disable CryoSoft's stream.
+    """A handler attached by something else must not disable I2AS's stream.
 
     The idempotency guard asks whether this stream's own writer is installed,
     so an unrelated handler no longer makes setup_logging() conclude it has
@@ -163,10 +163,10 @@ def test_foreign_handler_does_not_suppress_the_jsonl_writer(
     while the application looked healthy.
     """
     foreign = logging.NullHandler()
-    logging.getLogger("cryosoft.status").addHandler(foreign)
+    logging.getLogger("i2as.status").addHandler(foreign)
 
     logging_config.setup_logging(log_dir=tmp_path / "logs")
 
-    assert len(_jsonl_handlers("cryosoft.status")) == 1
+    assert len(_jsonl_handlers("i2as.status")) == 1
     # The foreign handler is left alone, not evicted.
-    assert foreign in logging.getLogger("cryosoft.status").handlers
+    assert foreign in logging.getLogger("i2as.status").handlers

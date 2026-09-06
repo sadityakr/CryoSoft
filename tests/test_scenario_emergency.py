@@ -12,7 +12,7 @@ there, so these run identically in both instrument modes. Two scenarios
 wedged read) are inherently about the threaded design itself and build a
 real ``InstrumentHost(mode="threaded")``, mirroring ``tests/
 test_instrument_thread.py``'s own convention of exercising the boundary
-directly rather than through the session's ``CRYOSOFT_INSTRUMENT_THREAD``
+directly rather than through the session's ``I2AS_INSTRUMENT_THREAD``
 switch.
 """
 
@@ -26,16 +26,16 @@ import h5py
 import pytest
 from PyQt6.QtCore import QThread
 
-from cryosoft.core import events as ev
-from cryosoft.core.instrument_host import InstrumentHost
-from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
-from cryosoft.core.plan import PhasePlan, StepPlan, Target
-from cryosoft.core.station import build_station
-from cryosoft.procedures.field_sweep import FieldSweep
+from i2as.core import events as ev
+from i2as.core.instrument_host import InstrumentHost
+from i2as.core.orchestrator import Orchestrator, OrchestratorState
+from i2as.core.plan import PhasePlan, StepPlan, Target
+from i2as.core.station import build_station
+from i2as.procedures.field_sweep import FieldSweep
 
 from tests import scenarios
 
-CONFIG_PATH = "cryosoft/configs/sim_cryostat"
+CONFIG_PATH = "i2as/configs/sim_cryostat"
 
 AGENT = ev.Actor(kind=ev.ActorKind.AGENT, id="scenario-agent", role="operator")
 
@@ -159,7 +159,7 @@ def test_emergency_during_measuring_ends_the_run_and_preserves_partial_data(
 
         vi.standby = _spy
 
-    with caplog.at_level(logging.CRITICAL, logger="cryosoft.core.orchestrator"):
+    with caplog.at_level(logging.CRITICAL, logger="i2as.core.orchestrator"):
         request_id = orchestrator.submit(_emergency_command("scenario 1"))
 
     # Verdict OK at once.
@@ -515,7 +515,7 @@ def test_tick_triggered_emergency_entry_is_logged_critical(orchestrator, station
     severity CLAUDE.md reserves for a safety event, the same as an
     operator's ``emergency_standby()``.
     """
-    with caplog.at_level(logging.CRITICAL, logger="cryosoft.core.orchestrator"):
+    with caplog.at_level(logging.CRITICAL, logger="i2as.core.orchestrator"):
         scenarios.apply_quench(station)
         _tick_until(
             orchestrator, lambda: orchestrator._state == OrchestratorState.EMERGENCY
@@ -716,7 +716,7 @@ def test_shutdown_is_bounded_over_a_wedged_read_and_names_the_vi(caplog):
     proxy.start_monitoring()
     assert wedged.wait(10.0), "the engine never reached the wedged read"
 
-    with caplog.at_level(logging.CRITICAL, logger="cryosoft.core.instrument_host"):
+    with caplog.at_level(logging.CRITICAL, logger="i2as.core.instrument_host"):
         started = time.monotonic()
         host.shutdown()
         elapsed = time.monotonic() - started

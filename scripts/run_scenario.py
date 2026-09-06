@@ -1,23 +1,23 @@
-"""Launch the real CryoSoft GUI pre-seeded into a hazardous/degraded state.
+"""Launch the real I2AS GUI pre-seeded into a hazardous/degraded state.
 
 Dev tool for exploring "what does the app actually do in state X" live,
 instead of only asserting it in ``tests/test_scenarios.py``. Reuses the
 exact same driver-level state-injection primitives that module and the rest
 of the test suite already use (``tests.scenarios``' ``apply_*`` functions),
-wired into ``cryosoft.main.main()``'s ``on_station_built`` hook — so this is
+wired into ``i2as.main.main()``'s ``on_station_built`` hook — so this is
 the same production ``main()``, same real Orchestrator tick loop, only the
 sim drivers' test-control attributes are set before the window shows.
 Requires a display (not for CI/offscreen use).
 
 Input: a scenario name plus its parameters on the command line (see
 --help). No config beyond the shipped ``sim_cryostat`` fallback station
-``cryosoft.main`` already resolves at startup.
+``i2as.main`` already resolves at startup.
 Process: builds and applies the requested scenario's driver flags the
 moment the Station is built, before the window is shown; scenarios that
 need several ticks to converge (quench's
 safety-flag propagation) simply appear once the operator starts monitoring
 in the running app, exactly as they would on real hardware.
-Output: the CryoSoft window, running live in the requested state, until the
+Output: the I2AS window, running live in the requested state, until the
 operator closes it.
 """
 
@@ -29,8 +29,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from cryosoft.core.station import Station  # noqa: E402
-from cryosoft.main import main  # noqa: E402
+from i2as.core.station import Station  # noqa: E402
+from i2as.main import main  # noqa: E402
 from tests import scenarios as scn  # noqa: E402
 
 _SCENARIOS = ("quench", "disconnect", "measurement-error")
@@ -62,7 +62,7 @@ def _build_apply(args: argparse.Namespace):
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Launch CryoSoft with a sim-driver scenario pre-armed, for live "
+            "Launch I2AS with a sim-driver scenario pre-armed, for live "
             "exploration of what the app allows/refuses in that state."
         )
     )

@@ -2,8 +2,8 @@ import pytest
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QTableWidgetItem
 
-from cryosoft.core.sweep_builder import SweepAxis
-from cryosoft.gui.sweep_axis_widget import SweepAxisWidget
+from i2as.core.sweep_builder import SweepAxis
+from i2as.gui.sweep_axis_widget import SweepAxisWidget
 
 
 @pytest.fixture

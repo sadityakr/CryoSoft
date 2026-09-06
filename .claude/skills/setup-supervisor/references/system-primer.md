@@ -7,9 +7,9 @@ to layers, and the whole point of triage is to name the layer:
 
 | Layer | What it is | Typical fault class |
 |---|---|---|
-| L0 Driver (`cryosoft/drivers/`) | One Python class per instrument, PyVISA underneath; `sim_*` twins mirror the API | wrong command string, parsing bug, missing waits |
-| L1 Virtual Instrument (`cryosoft/virtual_instruments/`) | Physics-level device built on driver(s); `@monitored`/`@control` methods | unit conversion, ramp logic, tolerance settings |
-| L2 Station + Config (`cryosoft/core/station.py`, `cryosoft/configs/<name>/`) | Builds everything from `devices.yaml`; stale-cache on comm errors | wrong address, wrong class, bad init_params |
+| L0 Driver (`i2as/drivers/`) | One Python class per instrument, PyVISA underneath; `sim_*` twins mirror the API | wrong command string, parsing bug, missing waits |
+| L1 Virtual Instrument (`i2as/virtual_instruments/`) | Physics-level device built on driver(s); `@monitored`/`@control` methods | unit conversion, ramp logic, tolerance settings |
+| L2 Station + Config (`i2as/core/station.py`, `i2as/configs/<name>/`) | Builds everything from `devices.yaml`; stale-cache on comm errors | wrong address, wrong class, bad init_params |
 | L3 Orchestrator | Tick loop (polling, ramps, safety) | tick interval vs instrument response time |
 | L4 Procedures | Measurement logic | parameter/sweep logic |
 | L5 Data manager | HDF5 | not instrument-facing |
@@ -22,12 +22,12 @@ live in L0; `CONFIG_INVALID` lives in L2.
 
 ## Where evidence lives
 
-The log directory is `cryosoft.core.paths.log_directory()` — the per-user
-state directory's `logs/` folder unless `CRYOSOFT_LOG_DIR` overrides it.
+The log directory is `i2as.core.paths.log_directory()` — the per-user
+state directory's `logs/` folder unless `I2AS_LOG_DIR` overrides it.
 
 | Artifact | Path | What it holds |
 |---|---|---|
-| Runtime log | `<log directory>/cryosoft.log` (+ rotated `.1`…`.5`) | DEBUG-level everything: VI calls, comm errors, state changes, safety events |
+| Runtime log | `<log directory>/i2as.log` (+ rotated `.1`…`.5`) | DEBUG-level everything: VI calls, comm errors, state changes, safety events |
 | Operational-status log | `<log directory>/status.jsonl` | one record per tick of the RUNNING app; `troubleshoot status` reads it |
 | Troubleshoot transcript | `<log directory>/troubleshoot.jsonl` | one JSON line per past diagnostic command (ts, argv, ok, payload) |
 | Incident reports | `<log directory>/incidents/*.md` | the "cannot conclude" exits of earlier diagnoses |
@@ -39,8 +39,8 @@ state directory's `logs/` folder unless `CRYOSOFT_LOG_DIR` overrides it.
 
 ## The troubleshoot CLI
 
-`python -m cryosoft.troubleshoot <subcommand> [--json]` — full table in
-`cryosoft/troubleshoot/README.md`. Key facts: one-shot commands, exit 0 =
+`python -m i2as.troubleshoot <subcommand> [--json]` — full table in
+`i2as/troubleshoot/README.md`. Key facts: one-shot commands, exit 0 =
 all OK / 1 = any fault, `--json` for parsing, every invocation appends to the
 transcript. Run only while the main app is closed, except `status` and
 `session`, which read files and are safe with the app open. Read-only
@@ -49,7 +49,7 @@ verbs: `scan`, `probe`, `check`, `bench-l0`, `methods`, `idn`, `read`,
 `query`, `send`.
 
 The `FaultCode` taxonomy is documented in the README and in
-`cryosoft/troubleshoot/engine.py` (each code's likely physical causes).
+`i2as/troubleshoot/engine.py` (each code's likely physical causes).
 
 ## Rules for software fixes
 

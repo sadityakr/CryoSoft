@@ -2,7 +2,7 @@
 
 Covers `Station.station_info()` (what is declared, in what order, and that
 building it never touches an instrument) and
-`cryosoft.core.capability_manifest` (the JSON rendering, its schema, its
+`i2as.core.capability_manifest` (the JSON rendering, its schema, its
 validator and its command-line entry point).
 
 The conformance suite carries the standard-shaped checks that must hold for
@@ -19,19 +19,19 @@ from pathlib import Path
 
 import pytest
 
-import cryosoft
-from cryosoft.core.capability_manifest import (
+import i2as
+from i2as.core.capability_manifest import (
     MANIFEST_SCHEMA,
     MANIFEST_SCHEMA_ID,
     build_manifest,
     main,
     validate_manifest,
 )
-from cryosoft.core.events import StationInfo
-from cryosoft.core.config import read_tick_interval_ms
-from cryosoft.core.station import Station, build_station
+from i2as.core.events import StationInfo
+from i2as.core.config import read_tick_interval_ms
+from i2as.core.station import Station, build_station
 
-SIM_CONFIG = str(Path(cryosoft.__file__).parent / "configs" / "sim_cryostat")
+SIM_CONFIG = str(Path(i2as.__file__).parent / "configs" / "sim_cryostat")
 
 
 @pytest.fixture
@@ -397,19 +397,19 @@ def test_cli_reports_an_unbuildable_config(tmp_path, capsys) -> None:
 
 
 def test_cli_runs_without_a_qapplication() -> None:
-    """`python -m cryosoft.core.capability_manifest` needs no Qt display.
+    """`python -m i2as.core.capability_manifest` needs no Qt display.
 
     Run in a subprocess with no Qt platform plugin available at all, so a
     stray `QApplication` (or any widget import that needs one) would fail
     rather than quietly succeed on the test session's offscreen platform.
     """
     result = subprocess.run(
-        [sys.executable, "-m", "cryosoft.core.capability_manifest", SIM_CONFIG],
+        [sys.executable, "-m", "i2as.core.capability_manifest", SIM_CONFIG],
         capture_output=True,
         text=True,
         timeout=120,
         env={"PATH": "/usr/bin:/bin", "QT_QPA_PLATFORM": "definitely-not-a-platform"},
-        cwd=str(Path(cryosoft.__file__).parent.parent),
+        cwd=str(Path(i2as.__file__).parent.parent),
     )
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["schema"] == MANIFEST_SCHEMA_ID

@@ -10,8 +10,8 @@ import pytest
 import inspect
 import os
 
-from cryosoft.core.exceptions import CryoSoftCommunicationError
-from cryosoft.troubleshoot.engine import (
+from i2as.core.exceptions import I2ASCommunicationError
+from i2as.troubleshoot.engine import (
     DriverBench,
     FaultCode,
     ProbeResult,
@@ -81,7 +81,7 @@ class OpenFailsDriver:
     """Fake driver whose constructor cannot open its resource."""
 
     def __init__(self, resource_string: str) -> None:
-        raise CryoSoftCommunicationError(
+        raise I2ASCommunicationError(
             f"cannot open {resource_string}", vi_name="OpenFailsDriver"
         )
 
@@ -93,7 +93,7 @@ class SilentDriver:
         pass
 
     def get_idn(self) -> str:
-        raise CryoSoftCommunicationError("timeout", vi_name="SilentDriver")
+        raise I2ASCommunicationError("timeout", vi_name="SilentDriver")
 
 
 class BuggyDriver:
@@ -217,7 +217,7 @@ def test_check_config_invalid_dir(tmp_path: Path) -> None:
 
 def test_check_config_unimportable_class(tmp_path: Path) -> None:
     config = make_config(
-        tmp_path, {"ghost": {"class": "cryosoft.drivers.nope.Ghost", "address": "X"}}
+        tmp_path, {"ghost": {"class": "i2as.drivers.nope.Ghost", "address": "X"}}
     )
     results = check_config(config)
     assert results[0].code is FaultCode.CONFIG_INVALID
@@ -325,9 +325,9 @@ def test_check_config_ok_but_unlisted_is_reported_in_detail(tmp_path: Path) -> N
 
 def test_check_config_shipped_sim_cryostat_preflights_green() -> None:
     """Integration: the always-safe shipped config passes its own preflight."""
-    import cryosoft
+    import i2as
 
-    config = Path(cryosoft.__file__).parent / "configs" / "sim_cryostat"
+    config = Path(i2as.__file__).parent / "configs" / "sim_cryostat"
     results = check_config(str(config))
     assert results, "sim_cryostat declares no drivers?"
     failed = [r for r in results if not r.ok]
@@ -343,7 +343,7 @@ def sim_bench(tmp_path: Path) -> DriverBench:
         tmp_path,
         {
             "meter": {
-                "class": "cryosoft.drivers.sim_keithley_2182a.SimKeithley2182A",
+                "class": "i2as.drivers.sim_keithley_2182a.SimKeithley2182A",
                 "address": "SIM::BENCH",
             }
         },

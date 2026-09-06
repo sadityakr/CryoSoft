@@ -1,7 +1,7 @@
 import pytest
 
-from cryosoft.core.plan import ParamSpec
-from cryosoft.core.sweep_builder import (
+from i2as.core.plan import ParamSpec
+from i2as.core.sweep_builder import (
     SweepAxis,
     SweepSegment,
     apply_hysteresis,

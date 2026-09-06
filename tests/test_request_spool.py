@@ -14,18 +14,18 @@ import json
 
 import pytest
 
-from cryosoft.core import events as ev
-from cryosoft.core.orchestrator import Orchestrator
-from cryosoft.core.request_spool import (
+from i2as.core import events as ev
+from i2as.core.orchestrator import Orchestrator
+from i2as.core.request_spool import (
     SCHEMA_VERSION,
     RequestSpool,
     spool_directory,
 )
-from cryosoft.core.config import read_request_spool_config
-from cryosoft.core.station import build_station
-from cryosoft.session.gateway import Role, authorize_spooled
+from i2as.core.config import read_request_spool_config
+from i2as.core.station import build_station
+from i2as.session.gateway import Role, authorize_spooled
 
-CONFIG_PATH = "cryosoft/configs/sim_cryostat"
+CONFIG_PATH = "i2as/configs/sim_cryostat"
 
 
 def _command(name, *, role=Role.SESSION, kind=ev.ActorKind.AGENT, actor_id="ctl-1", **args):
@@ -86,7 +86,7 @@ def test_a_request_is_written_atomically_and_named_for_its_request_id(spool):
 
 def test_the_spool_root_follows_the_log_directory(monkeypatch, tmp_path):
     """One installation rule for every machine-local directory."""
-    monkeypatch.setenv("CRYOSOFT_LOG_DIR", str(tmp_path / "logs"))
+    monkeypatch.setenv("I2AS_LOG_DIR", str(tmp_path / "logs"))
 
     assert spool_directory() == tmp_path / "logs" / "spool"
 

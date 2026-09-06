@@ -122,7 +122,7 @@ for the MCP adapter (the stdlib shim is the default and the one the tests
 run).
 
 The session layer needs a **measurement root** — the machine-level folder
-every experiment and run record lives under. Set `CRYOSOFT_MEASUREMENT_ROOT`
+every experiment and run record lives under. Set `I2AS_MEASUREMENT_ROOT`
 or write `measurement_root:` into the machine-level `App-config.yaml`
 (`core/paths.py` documents the precedence); an unconfigured installation
 refuses to start rather than inventing a location.
@@ -132,7 +132,7 @@ refuses to start rather than inventing a location.
 **The desktop application:**
 
 ```bash
-python -m cryosoft.main
+python -m i2as.main
 ```
 
 It opens the *active config* — the one saved on this machine from the last
@@ -142,7 +142,7 @@ so a broken config produces a warning instead of a crash. To start on the
 imaging example instead, mark it active once:
 
 ```bash
-python -c "from cryosoft.gui import app_settings; app_settings.set_config_active('sim_imaging', 'shipped')"
+python -c "from i2as.gui import app_settings; app_settings.set_config_active('sim_imaging', 'shipped')"
 ```
 
 Two windows open: the Monitor window (instrument cards, trends, the
@@ -154,7 +154,7 @@ previewed and published).
 **The MCP server**, for an agent session driving a *running* application:
 
 ```bash
-python -m cryosoft.mcp --role observer --actor-id my-agent
+python -m i2as.mcp --role observer --actor-id my-agent
 ```
 
 It finds the running app through the descriptor the app publishes beside
@@ -166,9 +166,9 @@ repository root declares this server for a Claude Code session.
 **The reference CLI**, one JSON answer per call over the same tool surface:
 
 ```bash
-python -m cryosoft.ctl --offline sim_cryostat tools          # build a sim station in-process
-python -m cryosoft.ctl --offline sim_imaging call read_station_info
-python -m cryosoft.ctl --role observer status                # live: through the request spool
+python -m i2as.ctl --offline sim_cryostat tools          # build a sim station in-process
+python -m i2as.ctl --offline sim_imaging call read_station_info
+python -m i2as.ctl --role observer status                # live: through the request spool
 ```
 
 Live mode writes one request file into the running app's request spool
@@ -179,9 +179,9 @@ reads the verdict the tick appends. Exit codes are the API: `0` answered
 **The doctor CLI**, for a setup with the application closed:
 
 ```bash
-python -m cryosoft.troubleshoot check --config sim_cryostat --json   # preflight every driver
-python -m cryosoft.troubleshoot status --max-age 30                  # what a RUNNING app is doing
-python -m cryosoft.troubleshoot session                              # report on the newest experiment
+python -m i2as.troubleshoot check --config sim_cryostat --json   # preflight every driver
+python -m i2as.troubleshoot status --max-age 30                  # what a RUNNING app is doing
+python -m i2as.troubleshoot session                              # report on the newest experiment
 ```
 
 ## The agent surface
@@ -240,8 +240,8 @@ The two lifecycle actions every VI has, `initiate` and `standby`, are
 without touching hardware; `probe_run` runs the same procedure on the same
 instruments through the same code path, subsampled to a few points, so a
 wrong column or an unreachable setpoint shows up in minutes. The MCP
-adapter also serves three resources — `cryosoft://status`,
-`cryosoft://station`, `cryosoft://manifest` — over the matching read tools.
+adapter also serves three resources — `i2as://status`,
+`i2as://station`, `i2as://manifest` — over the matching read tools.
 
 ## Safety
 
@@ -290,7 +290,7 @@ Each kind of file has exactly one shipped exemplar to copy and one folder
 README stating the standard it implements. Conformance tests auto-discover
 new files, so a new module is checked the moment it exists.
 
-**A driver.** Copy `cryosoft/drivers/lakeshore_335.py` and its twin
+**A driver.** Copy `i2as/drivers/lakeshore_335.py` and its twin
 `sim_lakeshore_335.py`: one public class, `__init__(self, resource: str)`,
 `get_idn()`, `close()`, `safe_shutdown()`, and every state-changing write
 verified (error queue, status byte, protocol acknowledgement or readback).
@@ -306,20 +306,20 @@ example with an image block; `measurement/dc_separate_measurement.py` the
 one with a loopable parameter. Standard: `virtual_instruments/README.md`
 and `MeasurementInstrumentBase`'s docstring.
 
-**A procedure.** Copy `cryosoft/procedures/field_sweep.py`: subclass
+**A procedure.** Copy `i2as/procedures/field_sweep.py`: subclass
 `SweepMeasureProcedure`, declare a `sweep_axis`, name the instrument roles
 you need in `role_parameters`, and implement the six axis hooks. The
 parameter form, queue validation, probe run, duration estimate and agent
 tools follow. Standard: `procedures/README.md`.
 
-**An analysis recipe.** `python -m cryosoft.analysis new-recipe <name>
+**An analysis recipe.** `python -m i2as.analysis new-recipe <name>
 --dir <experiment>/analysis/recipes` scaffolds one;
 `analysis/recipes/field_image_stack.py` is the shipped example serving one
 procedure. A recipe reads the run only through the run-source vocabulary and
 draws only through its context. Standard: `analysis/README.md` and
 `AnalysisRecipe`'s docstring.
 
-**A config.** Copy `cryosoft/configs/sim_cryostat/`: `devices.yaml` names
+**A config.** Copy `i2as/configs/sim_cryostat/`: `devices.yaml` names
 the drivers, the VIs on them and every limit; `monitor.yaml` the tick period
 and the gateway, spool and thread switches; `setup.md` the wiring and quirks
 a future reader needs. Standard: `configs/README.md`.
@@ -339,7 +339,7 @@ a future reader needs. Standard: `configs/README.md`.
 4. Write `setup.md` from the shipped template: instrument purposes, wiring,
    safe-testing overrides, dated quirks.
 5. Run the preflight with the application closed —
-   `python -m cryosoft.troubleshoot check --config <name> --json` — and fix
+   `python -m i2as.troubleshoot check --config <name> --json` — and fix
    one fault at a time; `bench-l0` reads one passive getter per driver at
    zero excitation. The `setup-commission` and `setup-supervisor` skills in
    `.claude/skills/` are the guided form of this workflow.
@@ -357,7 +357,7 @@ procedure, config and recipe and checks it against its standard (if it
 fails on your module, fix the module); and the behaviour suites cover each
 layer. The GUI suite runs twice — on the instrument thread (the default)
 and in the temporary `inline` mode (`make test-instrument-inline`,
-`CRYOSOFT_INSTRUMENT_THREAD=0`) — which is what keeps "nothing above the
+`I2AS_INSTRUMENT_THREAD=0`) — which is what keeps "nothing above the
 thread boundary can tell" true. Tests marked `hardware` need instruments
 and are excluded.
 

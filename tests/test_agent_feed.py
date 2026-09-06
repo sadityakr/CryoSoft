@@ -13,9 +13,9 @@ import json
 
 import pytest
 
-from cryosoft.core import events as ev
-from cryosoft.core.station import build_station
-from cryosoft.session.agent_feed import (
+from i2as.core import events as ev
+from i2as.core.station import build_station
+from i2as.session.agent_feed import (
     RECORD_COMMAND,
     RECORD_EVENT,
     RECORD_VERDICT,
@@ -23,8 +23,8 @@ from cryosoft.session.agent_feed import (
     AgentFeed,
     read_feed,
 )
-from cryosoft.session.gateway import Gateway, Role
-from cryosoft.session.store import ExperimentStore
+from i2as.session.gateway import Gateway, Role
+from i2as.session.store import ExperimentStore
 
 AGENT = ev.Actor(kind=ev.ActorKind.AGENT, id="runner-7", role="session")
 OBSERVER = ev.Actor(kind=ev.ActorKind.AGENT, id="watcher", role="observer")
@@ -338,9 +338,9 @@ def test_every_line_is_json_and_the_file_is_append_only(feed):
 @pytest.fixture
 def orchestrator(qtbot):
     """A real Orchestrator over a real simulated station."""
-    from cryosoft.core.orchestrator import Orchestrator
+    from i2as.core.orchestrator import Orchestrator
 
-    station = build_station("cryosoft/configs/sim_cryostat")
+    station = build_station("i2as/configs/sim_cryostat")
     orch = Orchestrator(station, tick_interval_ms=10)
     yield orch, station
     orch.shutdown()

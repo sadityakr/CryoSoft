@@ -1,6 +1,6 @@
 import pytest
 
-from cryosoft.core.gates import Gate
+from i2as.core.gates import Gate
 
 
 def test_rejects_empty_name():
@@ -30,7 +30,7 @@ def test_action_only_runs_once_and_satisfies_same_step():
 
 def test_check_only_waits_for_continuous_window(monkeypatch):
     now = [0.0]
-    monkeypatch.setattr("cryosoft.core.gates.time.time", lambda: now[0])
+    monkeypatch.setattr("i2as.core.gates.time.time", lambda: now[0])
 
     gate = Gate("g", check=lambda: True, window_s=5.0)
     assert gate.step() is False  # stability clock just started
@@ -45,7 +45,7 @@ def test_check_only_waits_for_continuous_window(monkeypatch):
 def test_check_only_resets_clock_on_false(monkeypatch):
     now = [0.0]
     stable = [True]
-    monkeypatch.setattr("cryosoft.core.gates.time.time", lambda: now[0])
+    monkeypatch.setattr("i2as.core.gates.time.time", lambda: now[0])
 
     gate = Gate("g", check=lambda: stable[0], window_s=5.0)
     gate.step()  # stable_since = 0.0
@@ -67,7 +67,7 @@ def test_check_only_resets_clock_on_false(monkeypatch):
 def test_action_then_check_runs_action_before_clock_starts(monkeypatch):
     now = [0.0]
     calls = []
-    monkeypatch.setattr("cryosoft.core.gates.time.time", lambda: now[0])
+    monkeypatch.setattr("i2as.core.gates.time.time", lambda: now[0])
 
     gate = Gate("g", check=lambda: True, window_s=2.0, action=lambda: calls.append(1))
     assert gate.step() is False  # action ran, clock just started

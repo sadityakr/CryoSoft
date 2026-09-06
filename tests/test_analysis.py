@@ -18,8 +18,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-import cryosoft
-from cryosoft.analysis.base import (
+import i2as
+from i2as.analysis.base import (
     MATPLOTLIB_INSTALL_HINT,
     AnalysisContext,
     AnalysisError,
@@ -28,7 +28,7 @@ from cryosoft.analysis.base import (
     choose_x_column,
     measured_columns,
 )
-from cryosoft.analysis.discovery import (
+from i2as.analysis.discovery import (
     ORIGIN_EXPERIMENT,
     ORIGIN_PACKAGE,
     RECIPE_TEMPLATE,
@@ -39,7 +39,7 @@ from cryosoft.analysis.discovery import (
     recipe_for,
     scaffold_recipe,
 )
-from cryosoft.analysis.report import (
+from i2as.analysis.report import (
     ANY_PROCEDURE,
     REPORT_FAILED,
     REPORT_FILENAME,
@@ -47,11 +47,11 @@ from cryosoft.analysis.report import (
     AnalysisReport,
     AnalysisSpec,
 )
-from cryosoft.analysis.runner import read_report, run_spec, write_report
-from cryosoft.core.data_manager import DataManager
-from cryosoft.core.data_reader import open_run
+from i2as.analysis.runner import read_report, run_spec, write_report
+from i2as.core.data_manager import DataManager
+from i2as.core.data_reader import open_run
 
-REPO_ROOT = Path(cryosoft.__file__).parent.parent
+REPO_ROOT = Path(i2as.__file__).parent.parent
 
 N_POINTS = 5
 
@@ -157,8 +157,8 @@ def _spec(run_file: Path, output_dir: Path, **overrides) -> AnalysisSpec:
 
 
 EXPERIMENT_RECIPE = '''
-from cryosoft.analysis.base import AnalysisRecipe
-from cryosoft.analysis.report import AnalysisReport
+from i2as.analysis.base import AnalysisRecipe
+from i2as.analysis.report import AnalysisReport
 
 
 class LocalRecipe(AnalysisRecipe):
@@ -171,8 +171,8 @@ class LocalRecipe(AnalysisRecipe):
 '''
 
 OVERRIDING_RECIPE = '''
-from cryosoft.analysis.base import AnalysisRecipe
-from cryosoft.analysis.report import AnalysisReport
+from i2as.analysis.base import AnalysisRecipe
+from i2as.analysis.report import AnalysisReport
 
 
 class MyGenericSweep(AnalysisRecipe):
@@ -187,7 +187,7 @@ class MyGenericSweep(AnalysisRecipe):
 BROKEN_RECIPE = "this is not python at all ((("
 
 RAISING_RECIPE = '''
-from cryosoft.analysis.base import AnalysisRecipe
+from i2as.analysis.base import AnalysisRecipe
 
 
 class Boom(AnalysisRecipe):
@@ -493,7 +493,7 @@ def test_run_spec_reports_a_recipe_returning_junk(tmp_path, run_file):
     recipes_dir = tmp_path / "recipes"
     recipes_dir.mkdir()
     (recipes_dir / "junk.py").write_text(
-        'from cryosoft.analysis.base import AnalysisRecipe\n\n\n'
+        'from i2as.analysis.base import AnalysisRecipe\n\n\n'
         'class Junk(AnalysisRecipe):\n'
         '    name = "junk"\n'
         '    procedures = ("*",)\n'
@@ -516,8 +516,8 @@ def test_run_spec_collects_context_warnings(tmp_path, run_file):
     recipes_dir = tmp_path / "recipes"
     recipes_dir.mkdir()
     (recipes_dir / "noisy.py").write_text(
-        'from cryosoft.analysis.base import AnalysisRecipe\n'
-        'from cryosoft.analysis.report import AnalysisReport\n\n\n'
+        'from i2as.analysis.base import AnalysisRecipe\n'
+        'from i2as.analysis.report import AnalysisReport\n\n\n'
         'class Noisy(AnalysisRecipe):\n'
         '    name = "noisy"\n'
         '    procedures = ("*",)\n'
@@ -594,7 +594,7 @@ def test_generic_sweep_without_matplotlib(tmp_path, run_file, monkeypatch):
     def _refuse() -> None:
         raise AnalysisError(f"matplotlib is not installed: {MATPLOTLIB_INSTALL_HINT}")
 
-    monkeypatch.setattr("cryosoft.analysis.base._import_pyplot", _refuse)
+    monkeypatch.setattr("i2as.analysis.base._import_pyplot", _refuse)
 
     report = run_spec(_spec(run_file, tmp_path / "report"))
 
@@ -623,8 +623,8 @@ def test_every_shipped_procedure_has_a_recipe():
     and the one procedure-specific recipe wins for its own procedure."""
     import pkgutil
 
-    import cryosoft.procedures
-    from cryosoft.core.procedure import BaseProcedure
+    import i2as.procedures
+    from i2as.core.procedure import BaseProcedure
 
     recipes = discover_recipes()
     by_name = {info.name: info for info in recipes}
@@ -632,8 +632,8 @@ def test_every_shipped_procedure_has_a_recipe():
     assert ANY_PROCEDURE in by_name["facts_only"].procedures
     assert by_name["field_image_stack"].procedures == ("FieldImaging",)
 
-    for module_info in pkgutil.iter_modules(cryosoft.procedures.__path__):
-        module = importlib.import_module(f"{cryosoft.procedures.__name__}.{module_info.name}")
+    for module_info in pkgutil.iter_modules(i2as.procedures.__path__):
+        module = importlib.import_module(f"{i2as.procedures.__name__}.{module_info.name}")
         for cls in vars(module).values():
             if not (isinstance(cls, type) and issubclass(cls, BaseProcedure)):
                 continue
@@ -649,7 +649,7 @@ def test_every_shipped_procedure_has_a_recipe():
 
 
 def _worker(*args: str, cwd: Path) -> subprocess.CompletedProcess:
-    """Run ``python -m cryosoft.analysis`` in a real subprocess.
+    """Run ``python -m i2as.analysis`` in a real subprocess.
 
     Args:
         *args: The command line after the module name.
@@ -660,7 +660,7 @@ def _worker(*args: str, cwd: Path) -> subprocess.CompletedProcess:
     """
     env = {**os.environ, "PYTHONPATH": str(REPO_ROOT), "MPLBACKEND": "Agg"}
     return subprocess.run(
-        [sys.executable, "-m", "cryosoft.analysis", *args],
+        [sys.executable, "-m", "i2as.analysis", *args],
         cwd=str(cwd),
         env=env,
         capture_output=True,
@@ -839,7 +839,7 @@ def _image_spec(run_file: Path, output_dir: Path, **overrides) -> AnalysisSpec:
 
 
 def test_coercive_fields_reads_both_crossings_of_a_loop():
-    from cryosoft.analysis.recipes.field_image_stack import coercive_fields
+    from i2as.analysis.recipes.field_image_stack import coercive_fields
 
     field = np.concatenate([np.linspace(-1.0, 1.0, 21), np.linspace(1.0, -1.0, 21)])
     crossings = coercive_fields(field, _hysteresis(field, coercive=0.45))
@@ -850,7 +850,7 @@ def test_coercive_fields_reads_both_crossings_of_a_loop():
 
 def test_coercive_fields_needs_a_real_switch():
     """A constant, noise alone, or a single point yields no crossing."""
-    from cryosoft.analysis.recipes.field_image_stack import coercive_fields
+    from i2as.analysis.recipes.field_image_stack import coercive_fields
 
     field = np.linspace(-1.0, 1.0, 11)
     assert coercive_fields(field, np.full(11, 3.0)) == []
@@ -862,7 +862,7 @@ def test_coercive_fields_needs_a_real_switch():
 
 
 def test_panel_indices_keep_the_ends_under_the_cap():
-    from cryosoft.analysis.recipes.field_image_stack import MAX_PANELS, _panel_indices
+    from i2as.analysis.recipes.field_image_stack import MAX_PANELS, _panel_indices
 
     assert _panel_indices(0) == []
     assert _panel_indices(5) == [0, 1, 2, 3, 4]
@@ -931,7 +931,7 @@ def test_field_image_stack_without_matplotlib(tmp_path, image_run_file, monkeypa
     def _refuse() -> None:
         raise AnalysisError(f"matplotlib is not installed: {MATPLOTLIB_INSTALL_HINT}")
 
-    monkeypatch.setattr("cryosoft.analysis.base._import_pyplot", _refuse)
+    monkeypatch.setattr("i2as.analysis.base._import_pyplot", _refuse)
 
     report = run_spec(_image_spec(image_run_file, tmp_path / "report"))
 

@@ -5,8 +5,8 @@ from __future__ import annotations
 import time
 import pytest
 
-from cryosoft.core.exceptions import CryoSoftCommunicationError
-from cryosoft.drivers.sim_lakeshore_335 import SimLakeshore335
+from i2as.core.exceptions import I2ASCommunicationError
+from i2as.drivers.sim_lakeshore_335 import SimLakeshore335
 
 
 def test_idn():
@@ -134,9 +134,9 @@ def test_simulation_evolution():
 def test_error_injection():
     d = SimLakeshore335("SIM")
     d._simulate_error = True
-    with pytest.raises(CryoSoftCommunicationError):
+    with pytest.raises(I2ASCommunicationError):
         d.get_temperature()
-    with pytest.raises(CryoSoftCommunicationError):
+    with pytest.raises(I2ASCommunicationError):
         d.get_idn()
 
 

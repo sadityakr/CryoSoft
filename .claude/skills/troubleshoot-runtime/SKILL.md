@@ -1,6 +1,6 @@
 ---
 name: troubleshoot-runtime
-description: Explain what a RUNNING I2AS measurement is doing and whether it is stuck, slow, or normal. Reads the live operational-status log (status.jsonl, in the resolved log directory — see cryosoft.core.paths.log_directory(), overridable via CRYOSOFT_LOG_DIR — written by the Orchestrator each tick) via `python -m cryosoft.troubleshoot status` and interprets state, per-instrument ramp progress, ETA, and stall alerts in plain language for the operator. Use when the app is running and the user asks "why is this taking so long", "is it stuck", "what is it doing", "is this normal". NOT for setup-time instrument or config faults with the app closed — that is the setup-supervisor skill.
+description: Explain what a RUNNING I2AS measurement is doing and whether it is stuck, slow, or normal. Reads the live operational-status log (status.jsonl, in the resolved log directory — see i2as.core.paths.log_directory(), overridable via I2AS_LOG_DIR — written by the Orchestrator each tick) via `python -m i2as.troubleshoot status` and interprets state, per-instrument ramp progress, ETA, and stall alerts in plain language for the operator. Use when the app is running and the user asks "why is this taking so long", "is it stuck", "what is it doing", "is this normal". NOT for setup-time instrument or config faults with the app closed — that is the setup-supervisor skill.
 ---
 
 # troubleshoot-runtime — explain what a running measurement is doing
@@ -12,17 +12,17 @@ to worry.
 
 This works **while the app is running**. It only reads a log file
 (`status.jsonl`, in the resolved log directory — see
-`cryosoft.core.paths.log_directory()`, overridable via the
-`CRYOSOFT_LOG_DIR` environment variable), so it never touches an instrument
+`i2as.core.paths.log_directory()`, overridable via the
+`I2AS_LOG_DIR` environment variable), so it never touches an instrument
 and never needs the app closed. That is the opposite of `setup-supervisor`,
 which diagnoses instruments with the app CLOSED.
 
 ## The one command
 
 ```
-python -m cryosoft.troubleshoot status --max-age 30           # plain-English digest
-python -m cryosoft.troubleshoot status --max-age 30 --json    # structured, for you to parse
-python -m cryosoft.troubleshoot status --max-age 30 --last 20 # widen the trend window
+python -m i2as.troubleshoot status --max-age 30           # plain-English digest
+python -m i2as.troubleshoot status --max-age 30 --json    # structured, for you to parse
+python -m i2as.troubleshoot status --max-age 30 --last 20 # widen the trend window
 ```
 
 It reads the tail of `status.jsonl` and prints: the orchestrator state and how

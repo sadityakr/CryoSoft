@@ -21,12 +21,12 @@ from pathlib import Path
 
 import pytest
 
-from cryosoft.core import events as ev
-from cryosoft.core.data_reader import list_columns, open_run, summary_stats
-from cryosoft.core.orchestrator import Orchestrator
-from cryosoft.core.station import build_station
-from cryosoft.procedures.field_sweep import FieldSweep
-from cryosoft.session.gateway import (
+from i2as.core import events as ev
+from i2as.core.data_reader import list_columns, open_run, summary_stats
+from i2as.core.orchestrator import Orchestrator
+from i2as.core.station import build_station
+from i2as.procedures.field_sweep import FieldSweep
+from i2as.session.gateway import (
     ActionClass,
     Gateway,
     Role,
@@ -37,11 +37,11 @@ from cryosoft.session.gateway import (
     render_tools,
     validate_tool_args,
 )
-from cryosoft.session.manager import ExperimentManager
-from cryosoft.session.models import RunRecord, User
-from cryosoft.session.store import ExperimentStore, UserRoster
+from i2as.session.manager import ExperimentManager
+from i2as.session.models import RunRecord, User
+from i2as.session.store import ExperimentStore, UserRoster
 
-CONFIG_PATH = "cryosoft/configs/sim_cryostat"
+CONFIG_PATH = "i2as/configs/sim_cryostat"
 
 SAMPLE_INFO = {"sample_name": "S", "sample_id": "S-1", "comments": ""}
 
@@ -678,11 +678,11 @@ def eln_gateway(qtbot, tmp_path):
     ``build(role)`` returns a gateway over the shared context, so one recorded
     run serves every role and attendance combination.
     """
-    from cryosoft.session.agent_feed import AgentFeed
-    from cryosoft.session.eln.drafting import FakeDraftClient
-    from cryosoft.session.eln.publisher import ElnPublisher
-    from cryosoft.session.eln.settings import AssistantSettings, ElnSettings
-    from cryosoft.session.eln.sim_eln import SimElnAdapter
+    from i2as.session.agent_feed import AgentFeed
+    from i2as.session.eln.drafting import FakeDraftClient
+    from i2as.session.eln.publisher import ElnPublisher
+    from i2as.session.eln.settings import AssistantSettings, ElnSettings
+    from i2as.session.eln.sim_eln import SimElnAdapter
 
     station = build_station(CONFIG_PATH)
     station.magnet_z._default_ramp_rate = 6000.0
@@ -710,7 +710,7 @@ def eln_gateway(qtbot, tmp_path):
             backend="sim_eln",
             base_url="https://sim.example",
             api_key="k",
-            tags=("cryosoft",),
+            tags=("i2as",),
             retry_base_s=0.0,
             retry_max_s=0.0,
         ),
@@ -825,7 +825,7 @@ def test_two_drafts_of_one_run_are_the_same_question(eln_gateway):
 
 def test_a_draft_records_what_it_cost_in_the_agent_feed(eln_gateway):
     """What an autonomous client spent, in the trail beside what it asked for."""
-    from cryosoft.session.agent_feed import RECORD_TOOL, read_feed
+    from i2as.session.agent_feed import RECORD_TOOL, read_feed
 
     build, _manager, _publisher, _adapter, _client, run_id = eln_gateway
     gateway = build()
@@ -890,7 +890,7 @@ def test_an_unattended_session_agent_publishes_straight_to_the_outbox(eln_gatewa
     assert publisher.pending_count() == 1
     assert manager.pending_eln_draft(run_id) == {}, "nothing waits on a human"
 
-    from cryosoft.session.eln.outbox import DRAIN_PUBLISHED
+    from i2as.session.eln.outbox import DRAIN_PUBLISHED
 
     assert publisher.drain_once().state == DRAIN_PUBLISHED
     (entry,) = adapter.entries.values()
@@ -1003,7 +1003,7 @@ RECIPE_SOURCE = 'NAME = "drift"\n\n\ndef analyse(run, context):\n    return None
 
 @pytest.fixture
 def fake_discovery(tmp_path, monkeypatch):
-    """Stand in for `cryosoft.analysis.discovery`, which another layer owns.
+    """Stand in for `i2as.analysis.discovery`, which another layer owns.
 
     The gateway imports it lazily inside the tools precisely so this module
     loads without it; here it is replaced by a module implementing the same
@@ -1079,17 +1079,17 @@ def fake_discovery(tmp_path, monkeypatch):
         path.write_text(header + "# template\n", encoding="utf-8")
         return path
 
-    module = types.ModuleType("cryosoft.analysis.discovery")
+    module = types.ModuleType("i2as.analysis.discovery")
     module.RecipeInfo = RecipeInfo
     module.discover_recipes = discover_recipes
     module.recipe_for = recipe_for
     module.scaffold_recipe = scaffold_recipe
     module.AnalysisError = AnalysisError
 
-    import cryosoft.analysis
+    import i2as.analysis
 
-    monkeypatch.setitem(sys.modules, "cryosoft.analysis.discovery", module)
-    monkeypatch.setattr(cryosoft.analysis, "discovery", module, raising=False)
+    monkeypatch.setitem(sys.modules, "i2as.analysis.discovery", module)
+    monkeypatch.setattr(i2as.analysis, "discovery", module, raising=False)
     return types.SimpleNamespace(module=module, package_recipe=package_recipe)
 
 
@@ -1121,7 +1121,7 @@ def analysis_gateway(qtbot, tmp_path, monkeypatch, fake_discovery):
     they are the ELN track's to add, and this suite tests what the gateway
     does with them, not where they point.
     """
-    from cryosoft.session.agent_feed import AgentFeed
+    from i2as.session.agent_feed import AgentFeed
 
     station = build_station(CONFIG_PATH)
     orch = Orchestrator(
@@ -1361,7 +1361,7 @@ def test_a_recipe_that_does_not_compile_is_refused_at_write_time(analysis_gatewa
 
 def test_a_recipe_over_the_size_cap_is_refused(analysis_gateway):
     """A file nobody could review is not a recipe."""
-    from cryosoft.session.gateway.tools import MAX_RECIPE_BYTES
+    from i2as.session.gateway.tools import MAX_RECIPE_BYTES
 
     answer = analysis_gateway.build().call_tool(
         "write_analysis_recipe",
@@ -1562,7 +1562,7 @@ def test_the_two_acting_tools_leave_a_trail_without_the_whole_source(
     nobody reads; the digest is what proves which text was written, and it is
     checkable against the file on disk.
     """
-    from cryosoft.session.agent_feed import read_feed
+    from i2as.session.agent_feed import read_feed
 
     gateway = analysis_gateway.build()
     gateway.call_tool(
@@ -1588,7 +1588,7 @@ def test_the_two_acting_tools_leave_a_trail_without_the_whole_source(
 
 def test_a_refused_analysis_call_is_recorded_too(analysis_gateway):
     """What an agent TRIED is as much of the trail as what it managed."""
-    from cryosoft.session.agent_feed import read_feed
+    from i2as.session.agent_feed import read_feed
 
     analysis_gateway.build(Role.OBSERVER).call_tool(
         "run_analysis", {"run_id": RUN_ID}
@@ -1609,11 +1609,11 @@ def test_the_analysis_tools_refuse_by_name_without_the_analysis_package(
     real_import = builtins.__import__
 
     def refuse(name, globals=None, locals=None, fromlist=(), level=0):
-        if name == "cryosoft.analysis" and "discovery" in (fromlist or ()):
+        if name == "i2as.analysis" and "discovery" in (fromlist or ()):
             raise ImportError("no analysis stage here")
         return real_import(name, globals, locals, fromlist, level)
 
-    monkeypatch.delitem(sys.modules, "cryosoft.analysis.discovery", raising=False)
+    monkeypatch.delitem(sys.modules, "i2as.analysis.discovery", raising=False)
     monkeypatch.setattr(builtins, "__import__", refuse)
 
     answer = analysis_gateway.build().call_tool("list_analysis_recipes")

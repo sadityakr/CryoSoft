@@ -1,4 +1,4 @@
-# CryoSoft CI — thin wrapper around the Makefile.
+# I2AS CI — thin wrapper around the Makefile.
 #
 # All check logic lives in the Makefile (single source of truth). This file
 # only prepares a Python + headless-Qt environment and calls the make targets.

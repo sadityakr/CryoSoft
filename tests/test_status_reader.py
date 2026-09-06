@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 import time
 
-from cryosoft.troubleshoot import status_reader
-from cryosoft.troubleshoot.cli import main
+from i2as.troubleshoot import status_reader
+from i2as.troubleshoot.cli import main
 
 
 def _write_log(path, records):

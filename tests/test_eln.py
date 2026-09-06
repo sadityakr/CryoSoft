@@ -1,4 +1,4 @@
-"""Behaviour tests for the ELN track (cryosoft/session/eln/).
+"""Behaviour tests for the ELN track (i2as/session/eln/).
 
 Conformance (tests/test_conformance.py) checks that every adapter *matches the
 standard*; these tests check that the track actually publishes, queues,
@@ -14,28 +14,28 @@ from dataclasses import replace
 
 import pytest
 
-from cryosoft.session.eln.adapter import ElnEntryRef, ElnError
-from cryosoft.session.eln.elabftw import (
+from i2as.session.eln.adapter import ElnEntryRef, ElnError
+from i2as.session.eln.elabftw import (
     ElabFtwAdapter,
     HttpResponse,
     UrllibTransport,
 )
-from cryosoft.session.eln.outbox import (
+from i2as.session.eln.outbox import (
     DRAIN_IDLE,
     DRAIN_PUBLISHED,
     DRAIN_RETRY,
     Outbox,
     OutboxJob,
 )
-from cryosoft.session.eln.settings import (
+from i2as.session.eln.settings import (
     API_KEY_ENV_VAR,
     SETTINGS_PATH_ENV_VAR,
     ElnSettings,
     eln_settings_path,
     load_eln_settings,
 )
-from cryosoft.session.eln.sim_eln import SimElnAdapter
-from cryosoft.session.eln.templates import (
+from i2as.session.eln.sim_eln import SimElnAdapter
+from i2as.session.eln.templates import (
     render_run_body,
     render_run_metadata,
     render_run_title,
@@ -58,7 +58,7 @@ MANIFEST = {
 
 
 def test_settings_path_prefers_the_environment_override(monkeypatch, tmp_path):
-    """``CRYOSOFT_ELN_SETTINGS`` wins over the per-user application-data path."""
+    """``I2AS_ELN_SETTINGS`` wins over the per-user application-data path."""
     monkeypatch.setenv(SETTINGS_PATH_ENV_VAR, str(tmp_path / "custom.json"))
     assert eln_settings_path() == tmp_path / "custom.json"
 
@@ -128,7 +128,7 @@ def test_sim_adapter_creates_updates_and_attaches():
     assert adapter.verify()
     assert adapter.list_templates()
 
-    ref = adapter.create_entry("Title", None, "<p>body</p>", ["cryosoft"], {"k": "v"})
+    ref = adapter.create_entry("Title", None, "<p>body</p>", ["i2as"], {"k": "v"})
     assert ref.backend == "sim_eln"
     assert ref.entry_id in adapter.entries
     assert ref.url.endswith(ref.entry_id)
@@ -237,7 +237,7 @@ def _job(tmp_path, run_id="run-0001", **overrides):
         "run_id": run_id,
         "title": render_run_title(MANIFEST),
         "body_html": render_run_body(MANIFEST, data_path=str(tmp_path / "run.h5")),
-        "tags": ["cryosoft"],
+        "tags": ["i2as"],
         "metadata": render_run_metadata(MANIFEST, "exp-1"),
         "data_path": str(tmp_path / "run.h5"),
     }
@@ -521,7 +521,7 @@ def test_elabftw_creates_an_entry_from_a_template_then_fills_it_in():
         },
         template_id="7",
     )
-    ref = adapter.create_entry("Run 1", None, "<p>body</p>", ["cryosoft"], {"run_id": "r1"})
+    ref = adapter.create_entry("Run 1", None, "<p>body</p>", ["i2as"], {"run_id": "r1"})
     assert ref.backend == "elabftw"
     assert ref.entry_id == "42"
     assert ref.template_id == "7"
@@ -532,7 +532,7 @@ def test_elabftw_creates_an_entry_from_a_template_then_fills_it_in():
     payload = json.loads(patch["body"])
     assert payload["title"] == "Run 1"
     assert payload["body"] == "<p>body</p>"
-    assert payload["tags"] == ["cryosoft"]
+    assert payload["tags"] == ["i2as"]
     assert json.loads(payload["metadata"]) == {"run_id": "r1"}
 
 
@@ -548,7 +548,7 @@ def test_elabftw_falls_back_to_the_body_for_the_new_entry_id():
 
 
 def test_elabftw_create_without_an_id_is_an_eln_error():
-    """An entry CryoSoft cannot address again is a failure, not a silent success."""
+    """An entry I2AS cannot address again is a failure, not a silent success."""
     adapter, _ = _elab({"POST /experiments": HttpResponse(201, {}, b"")})
     with pytest.raises(ElnError):
         adapter.create_entry("T", None, "", [], {})
@@ -653,17 +653,17 @@ def published_setup(tmp_path, qtbot):
     the experiment folder, so the whole path — relativize, resolve, attach —
     is exercised rather than stubbed.
     """
-    from cryosoft.core.orchestrator import Orchestrator
-    from cryosoft.core.station import build_station
-    from cryosoft.session.eln.publisher import ElnPublisher
-    from cryosoft.session.manager import ExperimentManager
-    from cryosoft.session.models import User
-    from cryosoft.session.store import ExperimentStore, UserRoster
+    from i2as.core.orchestrator import Orchestrator
+    from i2as.core.station import build_station
+    from i2as.session.eln.publisher import ElnPublisher
+    from i2as.session.manager import ExperimentManager
+    from i2as.session.models import User
+    from i2as.session.store import ExperimentStore, UserRoster
 
     store = ExperimentStore(tmp_path / "experiments")
     roster = UserRoster(tmp_path / "users.json")
     roster.add(User(user_id="jdoe", name="J. Doe"))
-    orchestrator = Orchestrator(build_station("cryosoft/configs/sim_cryostat"), tick_interval_ms=10)
+    orchestrator = Orchestrator(build_station("i2as/configs/sim_cryostat"), tick_interval_ms=10)
     manager = ExperimentManager(
         store=store, roster=roster, orchestrator=orchestrator, config_name="sim_cryostat"
     )
@@ -689,7 +689,7 @@ def published_setup(tmp_path, qtbot):
         backend="sim_eln",
         base_url="https://sim.example",
         api_key="k",
-        tags=("cryosoft", "sim"),
+        tags=("i2as", "sim"),
         # No backoff: these tests step the queue by hand, and the backoff
         # itself is exercised against the Outbox directly.
         retry_base_s=0.0,
@@ -717,7 +717,7 @@ def test_run_finished_publishes_one_entry_with_body_and_data(published_setup):
     (entry,) = adapter.entries.values()
     assert entry["title"].startswith("Sample A — Field Sweep")
     assert "run-0001" in entry["body_html"] and "sim_cryostat" in entry["body_html"]
-    assert entry["tags"] == ["cryosoft", "sim"]
+    assert entry["tags"] == ["i2as", "sim"]
     assert entry["metadata"]["run_id"] == "run-0001"
     assert adapter.uploads[0]["path"].endswith("run-0001.h5")
 
@@ -765,7 +765,7 @@ def test_a_duplicate_run_finished_publishes_exactly_once(published_setup):
 
 def test_the_publisher_accepts_a_run_finished_contract_event(published_setup):
     """``RunFinished`` and the Orchestrator's manifest dict are both accepted."""
-    from cryosoft.core.events import RunFinished
+    from i2as.core.events import RunFinished
 
     manager, publisher, adapter, manifest = published_setup
     event = RunFinished(run_id="run-0001", status="done", manifest=manifest)
@@ -815,7 +815,7 @@ def test_disabled_settings_publish_nothing_at_all(published_setup):
 
 def test_a_queued_job_survives_a_restart(published_setup, qtbot):
     """A publisher built afterwards adopts the outbox left on disk and drains it."""
-    from cryosoft.session.eln.publisher import ElnPublisher
+    from i2as.session.eln.publisher import ElnPublisher
 
     manager, publisher, adapter, manifest = published_setup
     adapter.offline = True
@@ -860,7 +860,7 @@ def test_run_published_signal_carries_the_link(published_setup, qtbot):
 
 def test_backends_are_discovered_not_listed():
     """A new backend module is selectable the moment its file exists."""
-    from cryosoft.session.eln.publisher import discover_backends
+    from i2as.session.eln.publisher import discover_backends
 
     backends = discover_backends()
     assert backends["elabftw"] is ElabFtwAdapter
@@ -933,7 +933,7 @@ DRAFT_STATION = {
 
 def _draft_request(**overrides):
     """Build a DraftRequest over the sample facts above."""
-    from cryosoft.session.eln.drafting import DraftRequest
+    from i2as.session.eln.drafting import DraftRequest
 
     fields = {
         "run_id": "run-0001",
@@ -952,7 +952,7 @@ def _draft_request(**overrides):
 
 def test_the_draft_prompt_carries_every_fact_in_a_fixed_order():
     """The prompt standard: run, parameters, statistics, station, state, note."""
-    from cryosoft.session.eln.drafting import render_draft_prompt
+    from i2as.session.eln.drafting import render_draft_prompt
 
     prompt = render_draft_prompt(_draft_request(operator_note="check the drift"))
 
@@ -975,7 +975,7 @@ def test_the_draft_prompt_carries_every_fact_in_a_fixed_order():
 
 def test_the_draft_prompt_is_deterministic_and_sorted():
     """The same request renders byte-identical text, whatever the dict order."""
-    from cryosoft.session.eln.drafting import render_draft_prompt
+    from i2as.session.eln.drafting import render_draft_prompt
 
     shuffled = dict(DRAFT_MANIFEST)
     shuffled["params"] = {"temperature_K": 4.2, "field_T": 1.5}
@@ -989,7 +989,7 @@ def test_the_draft_prompt_is_deterministic_and_sorted():
 
 def test_a_draft_carries_the_facts_the_prose_is_checked_against():
     """The body is the drafted prose ABOVE the run's own escaped fact tables."""
-    from cryosoft.session.eln.drafting import DRAFT_TAG, FakeDraftClient, draft_entry
+    from i2as.session.eln.drafting import DRAFT_TAG, FakeDraftClient, draft_entry
 
     client = FakeDraftClient(
         "TITLE: Field sweep at 1.5 T\nSUMMARY:\nThe sweep completed cleanly."
@@ -1015,7 +1015,7 @@ def test_a_drafted_body_is_self_contained_and_escapes_the_model():
     every way it could be fetched or followed, so nothing in the body is ever
     a live resource.
     """
-    from cryosoft.session.eln.drafting import FakeDraftClient, draft_entry
+    from i2as.session.eln.drafting import FakeDraftClient, draft_entry
 
     client = FakeDraftClient(
         "TITLE: <b>hi</b>\nSUMMARY:\n<script>alert(1)</script> see https://evil.example"
@@ -1032,7 +1032,7 @@ def test_a_drafted_body_is_self_contained_and_escapes_the_model():
 
 def test_the_prompt_digest_is_stable_and_moves_with_the_facts():
     """Two drafts of one run are provably the same question; a changed fact is visible."""
-    from cryosoft.session.eln.drafting import FakeDraftClient, draft_entry
+    from i2as.session.eln.drafting import FakeDraftClient, draft_entry
 
     first = draft_entry(_draft_request(), FakeDraftClient())
     again = draft_entry(_draft_request(), FakeDraftClient())
@@ -1045,7 +1045,7 @@ def test_the_prompt_digest_is_stable_and_moves_with_the_facts():
 
 def test_a_completion_missing_its_markers_still_drafts():
     """The marker shape parses tolerantly: no marker is a usable draft, not an error."""
-    from cryosoft.session.eln.drafting import FakeDraftClient, draft_entry
+    from i2as.session.eln.drafting import FakeDraftClient, draft_entry
 
     draft = draft_entry(_draft_request(), FakeDraftClient("Just some prose."))
 
@@ -1055,8 +1055,8 @@ def test_a_completion_missing_its_markers_still_drafts():
 
 def test_a_draft_reports_what_it_cost_from_the_settings_price_table():
     """cost_usd comes from the settings table, and an unpriced model reports 0.0."""
-    from cryosoft.session.eln.drafting import FakeDraftClient, draft_entry
-    from cryosoft.session.eln.settings import AssistantSettings
+    from i2as.session.eln.drafting import FakeDraftClient, draft_entry
+    from i2as.session.eln.settings import AssistantSettings
 
     settings = AssistantSettings(prices={"m-1": {"input": 5.0, "output": 25.0}})
     client = FakeDraftClient(model="m-1", input_tokens=1_000_000, output_tokens=100_000)
@@ -1078,8 +1078,8 @@ def test_a_draft_reports_what_it_cost_from_the_settings_price_table():
 
 def test_the_max_token_cap_reaches_the_client():
     """A runaway completion is bounded by the settings, not by the model."""
-    from cryosoft.session.eln.drafting import FakeDraftClient, draft_entry
-    from cryosoft.session.eln.settings import AssistantSettings
+    from i2as.session.eln.drafting import FakeDraftClient, draft_entry
+    from i2as.session.eln.settings import AssistantSettings
 
     client = FakeDraftClient()
     draft_entry(_draft_request(), client, AssistantSettings(max_tokens=321))
@@ -1089,7 +1089,7 @@ def test_the_max_token_cap_reaches_the_client():
 
 def test_a_draft_client_failure_is_one_eln_error():
     """One exception type out of the whole package, the model included."""
-    from cryosoft.session.eln.drafting import FakeDraftClient, draft_entry
+    from i2as.session.eln.drafting import FakeDraftClient, draft_entry
 
     with pytest.raises(ElnError):
         draft_entry(_draft_request(), FakeDraftClient(offline=True))
@@ -1097,7 +1097,7 @@ def test_a_draft_client_failure_is_one_eln_error():
 
 def test_the_anthropic_client_says_so_when_its_optional_sdk_is_absent():
     """A missing optional extra is one clear ElnError, at construction only."""
-    from cryosoft.session.eln import drafting
+    from i2as.session.eln import drafting
 
     # Importing the module, rendering prompts and drafting against the fake all
     # work regardless; only building the real client needs the SDK.
@@ -1106,7 +1106,7 @@ def test_the_anthropic_client_says_so_when_its_optional_sdk_is_absent():
     try:
         import anthropic  # noqa: F401
     except ImportError:
-        with pytest.raises(ElnError, match="cryosoft\\[assistant\\]"):
+        with pytest.raises(ElnError, match="i2as\\[assistant\\]"):
             drafting.AnthropicDraftClient()
     else:  # pragma: no cover - only when the optional extra is installed
         pytest.skip("the anthropic extra is installed; absence cannot be exercised")
@@ -1114,7 +1114,7 @@ def test_the_anthropic_client_says_so_when_its_optional_sdk_is_absent():
 
 def test_the_assistant_settings_redact_the_key_and_carry_a_price_table(tmp_path):
     """The assistant's key follows the ELN key's rule exactly: never logged."""
-    from cryosoft.session.eln.settings import (
+    from i2as.session.eln.settings import (
         ASSISTANT_API_KEY_ENV_VAR,
         DEFAULT_MODEL_PRICES,
         AssistantSettings,
@@ -1151,7 +1151,7 @@ def test_the_assistant_settings_redact_the_key_and_carry_a_price_table(tmp_path)
 
 def test_an_approved_draft_is_queued_as_one_ordinary_job(published_setup):
     """A draft is data: the same journal, the same drain, only the text differs."""
-    from cryosoft.session.eln.drafting import DraftEntry
+    from i2as.session.eln.drafting import DraftEntry
 
     manager, publisher, adapter, _manifest = published_setup
 
@@ -1174,7 +1174,7 @@ def test_an_approved_draft_is_queued_as_one_ordinary_job(published_setup):
     assert entry["title"] == "Drafted title"
     assert "Drafted prose over the facts." in entry["body_html"]
     # The notebook's own standing tags and the draft's own, merged and sorted.
-    assert entry["tags"] == ["Field Sweep", "cryosoft", "draft", "sim"]
+    assert entry["tags"] == ["Field Sweep", "draft", "i2as", "sim"]
     assert entry["metadata"]["run_id"] == "run-0001"
     assert entry["metadata"]["draft_model"] == "m-1"
     assert entry["metadata"]["draft_prompt_digest"] == "d" * 64
@@ -1200,7 +1200,7 @@ def test_an_approved_draft_is_queued_from_its_json_dict(published_setup):
 
 def test_an_approved_draft_does_not_publish_a_run_twice(published_setup):
     """Idempotent by the same job_id: a queued run is not requeued under a draft."""
-    from cryosoft.session.eln.drafting import DraftEntry
+    from i2as.session.eln.drafting import DraftEntry
 
     manager, publisher, adapter, manifest = published_setup
     manager._orchestrator.run_finished.emit(manifest)
@@ -1213,8 +1213,8 @@ def test_an_approved_draft_does_not_publish_a_run_twice(published_setup):
 
 def test_a_draft_is_never_queued_while_publishing_is_off(published_setup, tmp_path):
     """The track's master switch binds the drafting path exactly as the rest."""
-    from cryosoft.session.eln.drafting import DraftEntry
-    from cryosoft.session.eln.publisher import ElnPublisher
+    from i2as.session.eln.drafting import DraftEntry
+    from i2as.session.eln.publisher import ElnPublisher
 
     manager, _publisher, adapter, _manifest = published_setup
     off = ElnPublisher(manager, ElnSettings(enabled=False), adapter=adapter)
@@ -1225,7 +1225,7 @@ def test_a_draft_is_never_queued_while_publishing_is_off(published_setup, tmp_pa
 
 def test_a_pending_draft_rides_on_the_run_record_and_survives_json():
     """An unapproved draft is parked on the run record, JSON-safe and tolerant."""
-    from cryosoft.session.models import RunRecord
+    from i2as.session.models import RunRecord
 
     record = RunRecord(run_id="run-0001", pending_eln_draft={"title": "t", "tags": ["draft"]})
 
@@ -1277,7 +1277,7 @@ def test_a_pending_draft_survives_a_reload(published_setup):
 def test_an_unqueueable_draft_stays_pending(published_setup):
     """A publisher that queued nothing leaves the proposal exactly where it was."""
     manager, _publisher, adapter, _manifest = published_setup
-    from cryosoft.session.eln.publisher import ElnPublisher
+    from i2as.session.eln.publisher import ElnPublisher
 
     off = ElnPublisher(manager, ElnSettings(enabled=False), adapter=adapter)
     manager.attach_eln_publisher(off)
@@ -1309,7 +1309,7 @@ def test_approval_without_a_draft_or_a_publisher_queues_nothing(published_setup)
 
 def _report(**overrides):
     """Build an ``ok`` analysis report with one of everything."""
-    from cryosoft.analysis.report import AnalysisReport, FigureRef, ResultValue, TableSpec
+    from i2as.analysis.report import AnalysisReport, FigureRef, ResultValue, TableSpec
 
     fields = {
         "run_id": "run-0001",
@@ -1332,7 +1332,7 @@ def test_the_analysis_section_round_trips_through_a_saved_file(tmp_path):
     """The analysis switches live in the same user-level file, saved and read back."""
     import os
 
-    from cryosoft.session.eln.settings import AnalysisSettings, save_eln_settings
+    from i2as.session.eln.settings import AnalysisSettings, save_eln_settings
 
     settings = ElnSettings(
         enabled=True,
@@ -1361,7 +1361,7 @@ def test_the_analysis_section_round_trips_through_a_saved_file(tmp_path):
 
 def test_a_mangled_analysis_section_degrades_to_off(tmp_path):
     """Junk in the file is "analysis is off", never a broken startup."""
-    from cryosoft.session.eln.settings import AnalysisSettings
+    from i2as.session.eln.settings import AnalysisSettings
 
     path = tmp_path / "eln-settings.json"
     path.write_text(
@@ -1376,7 +1376,7 @@ def test_a_mangled_analysis_section_degrades_to_off(tmp_path):
 
 def test_a_pending_entry_carries_its_attachments_and_its_source():
     """Every pending entry is one shape; the stage that made it is a field on it."""
-    from cryosoft.session.eln.drafting import SOURCE_ANALYSIS, DraftEntry
+    from i2as.session.eln.drafting import SOURCE_ANALYSIS, DraftEntry
 
     entry = DraftEntry(
         title="Analysed",
@@ -1470,7 +1470,7 @@ def test_outbox_links_a_figure_that_is_not_there(tmp_path):
 
 def test_the_analysed_body_leads_with_the_result_and_ends_with_the_provenance():
     """The order a physicist reads it in, self-contained and deterministic."""
-    from cryosoft.session.eln.templates import render_analysed_body
+    from i2as.session.eln.templates import render_analysed_body
 
     report = _report()
     facts = {**MANIFEST, "params_digest": "digest-1"}
@@ -1508,7 +1508,7 @@ def test_the_analysed_body_leads_with_the_result_and_ends_with_the_provenance():
 
 def test_the_analysed_body_appends_the_fact_tables_only_when_asked():
     """The point of the stage: the result reaches the notebook, not the raw facts."""
-    from cryosoft.session.eln.templates import render_analysed_body
+    from i2as.session.eln.templates import render_analysed_body
 
     facts = {**MANIFEST, "summary_stats": {"B": {"count": 3, "min": 0.0, "max": 1.0}}}
     lean = render_analysed_body(_report(), facts, data_path="/d/run-0001.h5")
@@ -1523,8 +1523,8 @@ def test_the_analysed_body_appends_the_fact_tables_only_when_asked():
 
 def test_a_failed_report_says_so_in_the_title_and_the_body():
     """A failure is visible exactly where the result would have been."""
-    from cryosoft.analysis.report import REPORT_FAILED
-    from cryosoft.session.eln.templates import render_analysed_body, render_analysed_title
+    from i2as.analysis.report import REPORT_FAILED
+    from i2as.session.eln.templates import render_analysed_body, render_analysed_title
 
     report = _report(
         status=REPORT_FAILED, error="ZeroDivisionError: division by zero\nTraceback ..."
@@ -1543,7 +1543,7 @@ def test_a_failed_report_says_so_in_the_title_and_the_body():
 
 def test_a_finished_run_goes_to_the_analysis_stage_instead_of_the_queue(published_setup):
     """With the analysis stage on, nothing is queued — the run is analysed first."""
-    from cryosoft.session.eln.settings import AnalysisSettings
+    from i2as.session.eln.settings import AnalysisSettings
 
     manager, publisher, _adapter, manifest = published_setup
     publisher._settings = replace(publisher.settings, analysis=AnalysisSettings(enabled=True))
@@ -1561,7 +1561,7 @@ def test_a_finished_run_goes_to_the_analysis_stage_instead_of_the_queue(publishe
 
 def test_auto_publish_says_nothing_once_the_analysis_stage_is_on(published_setup):
     """The analysis fork is taken before auto-publish is even consulted."""
-    from cryosoft.session.eln.settings import AnalysisSettings
+    from i2as.session.eln.settings import AnalysisSettings
 
     manager, publisher, _adapter, manifest = published_setup
     publisher._settings = replace(
@@ -1631,7 +1631,7 @@ def test_an_analysed_entry_is_parked_and_its_approval_queues_one_job(
 
     (entry,) = adapter.entries.values()
     assert "The field swept cleanly." in entry["body_html"]
-    assert entry["tags"] == ["cryosoft", "sim", "sweep"]
+    assert entry["tags"] == ["i2as", "sim", "sweep"]
     assert entry["metadata"]["draft_source"] == "analysis"
     assert entry["metadata"]["recipe"] == "generic_sweep"
     assert entry["metadata"]["recipe_digest"] == "a" * 64
@@ -1664,7 +1664,7 @@ def test_export_report_refuses_an_unknown_run(published_setup, tmp_path):
 
 def test_reload_settings_starts_and_stops_the_drain_timer(published_setup):
     """Save in the eLab setup dialog, and the network follows immediately."""
-    from cryosoft.session.eln.settings import AnalysisSettings
+    from i2as.session.eln.settings import AnalysisSettings
 
     _manager, publisher, _adapter, _manifest = published_setup
     publisher.start()

@@ -1,6 +1,6 @@
 # ---
 # description: |
-#   Tests for cryosoft.session.maintenance_log — the maintenance-log
+#   Tests for i2as.session.maintenance_log — the maintenance-log
 #   framework. Covers LogKindSpec validation, the declared `maintenance`
 #   kind, MaintenanceLogStore's entry-revision model (add/revise/delete/
 #   revisions), write validation, and tolerant loads.
@@ -11,8 +11,8 @@ import logging
 
 import pytest
 
-from cryosoft.core.plan import ParamSpec
-from cryosoft.session.maintenance_log import (
+from i2as.core.plan import ParamSpec
+from i2as.session.maintenance_log import (
     DECLARED_LOG_KINDS,
     LogKindSpec,
     MaintenanceLogStore,

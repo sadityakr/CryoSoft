@@ -16,14 +16,14 @@ import math
 import numpy as np
 import pytest
 
-from cryosoft.core import data_reader as dr
-from cryosoft.core.events import Datapoint, RunFinished, RunStarted
-from cryosoft.core.exceptions import DataSchemaError
-from cryosoft.core.run_buffer import RunBuffer
-from cryosoft.core.station import build_station
-from cryosoft.procedures.field_sweep import FieldSweep
+from i2as.core import data_reader as dr
+from i2as.core.events import Datapoint, RunFinished, RunStarted
+from i2as.core.exceptions import DataSchemaError
+from i2as.core.run_buffer import RunBuffer
+from i2as.core.station import build_station
+from i2as.procedures.field_sweep import FieldSweep
 
-CONFIG_PATH = "cryosoft/configs/sim_cryostat"
+CONFIG_PATH = "i2as/configs/sim_cryostat"
 
 RUN_ID = "20260903_120000_001_fieldsweep"
 

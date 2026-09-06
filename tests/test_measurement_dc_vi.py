@@ -7,9 +7,9 @@
 # ---
 
 import pytest
-from cryosoft.drivers.sim_keithley_6221 import SimKeithley6221
-from cryosoft.drivers.sim_keithley_2182a import SimKeithley2182A
-from cryosoft.virtual_instruments.measurement.dc_separate_measurement import DCSeparateMeasurementVI
+from i2as.drivers.sim_keithley_6221 import SimKeithley6221
+from i2as.drivers.sim_keithley_2182a import SimKeithley2182A
+from i2as.virtual_instruments.measurement.dc_separate_measurement import DCSeparateMeasurementVI
 
 
 @pytest.fixture()

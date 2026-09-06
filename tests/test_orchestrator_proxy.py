@@ -10,18 +10,18 @@ the status mirror the host primed.
 
 import pytest
 
-from cryosoft.core import events as ev
-from cryosoft.core.instrument_host import (
+from i2as.core import events as ev
+from i2as.core.instrument_host import (
     MODES,
     THREAD_ENV_VAR,
     InstrumentHost,
     resolve_mode,
 )
-from cryosoft.core.orchestrator_proxy import OrchestratorProxy
-from cryosoft.core.station import build_station
-from cryosoft.core.status_mirror import StatusMirror
+from i2as.core.orchestrator_proxy import OrchestratorProxy
+from i2as.core.station import build_station
+from i2as.core.status_mirror import StatusMirror
 
-CONFIG_PATH = "cryosoft/configs/sim_cryostat"
+CONFIG_PATH = "i2as/configs/sim_cryostat"
 
 
 @pytest.fixture
@@ -201,7 +201,7 @@ def test_a_vi_action_carries_its_parameters_as_flat_scalars(proxy, host):
 
 def test_the_envelope_crosses_as_its_dict_form(proxy, host):
     """A typed envelope is rendered to JSON, so the command stays a payload."""
-    from cryosoft.core.plan import EnvelopeBound, ExperimentEnvelope
+    from i2as.core.plan import EnvelopeBound, ExperimentEnvelope
 
     envelope = ExperimentEnvelope(
         bounds={"magnet_z": EnvelopeBound(min_value=-1.0, max_value=1.0)}
@@ -251,8 +251,8 @@ def test_the_whole_gui_builds_against_the_proxy(host, proxy, qtbot):
     the proxy where they used to be handed the engine, and nothing else about
     them changes.
     """
-    from cryosoft.gui.monitor_window import MonitorWindow
-    from cryosoft.gui.procedure_window import ProcedureWindow
+    from i2as.gui.monitor_window import MonitorWindow
+    from i2as.gui.procedure_window import ProcedureWindow
 
     monitor = MonitorWindow(host.station, proxy, mirror=proxy.status)
     qtbot.addWidget(monitor)

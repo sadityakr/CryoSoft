@@ -6,14 +6,14 @@ import pytest
 from PyQt6.QtCore import QSettings
 from PyQt6.QtWidgets import QMessageBox, QScrollArea
 
-from cryosoft.core.orchestrator import Orchestrator
-from cryosoft.core.ramps import ACTIVE_RAMP_STATUS, RampRecord
-from cryosoft.core.station import build_station
-from cryosoft.gui import ramp_tracker_panel as ramp_tracker_module
-from cryosoft.gui.monitor_window import MonitorWindow
-from cryosoft.gui.ramp_tracker_panel import RampRow, RampTrackerPanel
+from i2as.core.orchestrator import Orchestrator
+from i2as.core.ramps import ACTIVE_RAMP_STATUS, RampRecord
+from i2as.core.station import build_station
+from i2as.gui import ramp_tracker_panel as ramp_tracker_module
+from i2as.gui.monitor_window import MonitorWindow
+from i2as.gui.ramp_tracker_panel import RampRow, RampTrackerPanel
 
-CONFIG_PATH = "cryosoft/configs/sim_cryostat"
+CONFIG_PATH = "i2as/configs/sim_cryostat"
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -27,9 +27,9 @@ def isolated_settings(tmp_path, monkeypatch):
     splitter state (including this quadrant's new bottom-right splitter), and
     a pytest run must never read or overwrite the user's real saved layout.
     """
-    from cryosoft.gui import app_settings
+    from i2as.gui import app_settings
 
-    ini_path = tmp_path / "cryosoft_test_settings.ini"
+    ini_path = tmp_path / "i2as_test_settings.ini"
     monkeypatch.setattr(
         app_settings,
         "get_settings",

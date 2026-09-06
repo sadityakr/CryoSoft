@@ -22,7 +22,7 @@ instrument reads.
 Usage (from the repo root, with the project venv, and with a measurement root
 configured because the windows read one):
 
-    CRYOSOFT_MEASUREMENT_ROOT=/tmp/soak QT_QPA_PLATFORM=offscreen \\
+    I2AS_MEASUREMENT_ROOT=/tmp/soak QT_QPA_PLATFORM=offscreen \\
         python scripts/soak_instrument_thread.py --minutes 3
 
 Not a test: nothing here asserts. It is the long-running counterpart to
@@ -42,12 +42,12 @@ from dataclasses import dataclass, field
 from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QApplication
 
-from cryosoft.core.instrument_host import InstrumentHost
-from cryosoft.core.station import build_station
-from cryosoft.gui.monitor_window import MonitorWindow
-from cryosoft.gui.procedure_window import ProcedureWindow
+from i2as.core.instrument_host import InstrumentHost
+from i2as.core.station import build_station
+from i2as.gui.monitor_window import MonitorWindow
+from i2as.gui.procedure_window import ProcedureWindow
 
-DEFAULT_CONFIG = "cryosoft/configs/sim_cryostat"
+DEFAULT_CONFIG = "i2as/configs/sim_cryostat"
 
 #: How often the heartbeat fires. Small enough that a stall of a tenth of a
 #: second is unmistakable, large enough not to be the load itself.

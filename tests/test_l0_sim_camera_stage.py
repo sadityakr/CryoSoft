@@ -12,11 +12,11 @@ import time
 import numpy as np
 import pytest
 
-from cryosoft.core import sim_environment
-from cryosoft.core.exceptions import CryoSoftCommunicationError, CryoSoftInstrumentError
-from cryosoft.drivers.sim_camera import SimCamera
-from cryosoft.drivers.sim_oxford_ips120 import SimOxfordIPS120
-from cryosoft.drivers.sim_xy_stage import SimXYStage
+from i2as.core import sim_environment
+from i2as.core.exceptions import I2ASCommunicationError, I2ASInstrumentError
+from i2as.drivers.sim_camera import SimCamera
+from i2as.drivers.sim_oxford_ips120 import SimOxfordIPS120
+from i2as.drivers.sim_xy_stage import SimXYStage
 
 
 def _unique(prefix: str) -> str:
@@ -84,9 +84,9 @@ class TestSimEnvironment:
 
         from ruamel.yaml import YAML
 
-        import cryosoft
+        import i2as
 
-        configs = Path(cryosoft.__file__).parent / "configs"
+        configs = Path(i2as.__file__).parent / "configs"
         checked = 0
         for devices in configs.glob("*/devices.yaml"):
             with devices.open(encoding="utf-8") as handle:
@@ -126,7 +126,7 @@ class TestSimCamera:
 
     def test_frame_is_refused_while_disarmed(self):
         cam = SimCamera("SIM::CAM")
-        with pytest.raises(CryoSoftInstrumentError) as info:
+        with pytest.raises(I2ASInstrumentError) as info:
             cam.get_frame()
         assert info.value.code == "NOT_ARMED"
         assert "get_frame" in info.value.context
@@ -150,7 +150,7 @@ class TestSimCamera:
 
     def test_exposure_out_of_range_is_refused_and_unchanged(self, camera):
         for bad in (0.0, -1.0, 100.0):
-            with pytest.raises(CryoSoftInstrumentError) as info:
+            with pytest.raises(I2ASInstrumentError) as info:
                 camera.set_exposure_s(bad)
             assert info.value.code == "EXPOSURE_RANGE"
         assert camera.get_exposure_s() == pytest.approx(0.01)
@@ -165,7 +165,7 @@ class TestSimCamera:
         assert frame.mean() == pytest.approx(16.0 * unbinned.mean(), rel=0.05)
 
     def test_unsupported_binning_is_refused(self, camera):
-        with pytest.raises(CryoSoftInstrumentError) as info:
+        with pytest.raises(I2ASInstrumentError) as info:
             camera.set_binning(3)
         assert info.value.code == "BINNING_UNSUPPORTED"
         assert camera.get_binning() == 1
@@ -177,7 +177,7 @@ class TestSimCamera:
 
     @pytest.mark.parametrize("roi", [(0, 0, 0, 10), (-1, 0, 10, 10), (120, 0, 10, 10), (0, 120, 10, 9)])
     def test_roi_outside_the_sensor_is_refused(self, camera, roi):
-        with pytest.raises(CryoSoftInstrumentError) as info:
+        with pytest.raises(I2ASInstrumentError) as info:
             camera.set_roi(*roi)
         assert info.value.code == "ROI_RANGE"
         assert camera.get_roi() == (0, 0, 128, 128)
@@ -236,9 +236,9 @@ class TestSimCamera:
 
     def test_closed_camera_refuses_every_command(self, camera):
         camera.close()
-        with pytest.raises(CryoSoftCommunicationError):
+        with pytest.raises(I2ASCommunicationError):
             camera.get_frame()
-        with pytest.raises(CryoSoftCommunicationError):
+        with pytest.raises(I2ASCommunicationError):
             camera.get_idn()
 
     def test_safe_shutdown_disarms(self, camera):
@@ -287,14 +287,14 @@ class TestSimXYStage:
         assert stage.get_target() == (3e-3, 2e-3)
 
     def test_out_of_travel_is_refused_and_nothing_moves(self, stage):
-        with pytest.raises(CryoSoftInstrumentError) as info:
+        with pytest.raises(I2ASInstrumentError) as info:
             stage.move_to(x_m=1e-3, y_m=SimXYStage.TRAVEL_MAX_M + 1e-3)
         assert info.value.code == "TRAVEL_LIMIT"
         assert "y_m" in info.value.context
         assert stage.get_target() == (0.0, 0.0)
 
     def test_speed_out_of_range_is_refused(self, stage):
-        with pytest.raises(CryoSoftInstrumentError) as info:
+        with pytest.raises(I2ASInstrumentError) as info:
             stage.set_speed(1.0)
         assert info.value.code == "SPEED_RANGE"
         assert stage.get_speed() == pytest.approx(1e-3)
@@ -321,5 +321,5 @@ class TestSimXYStage:
 
     def test_closed_stage_refuses_every_command(self, stage):
         stage.close()
-        with pytest.raises(CryoSoftCommunicationError):
+        with pytest.raises(I2ASCommunicationError):
             stage.get_position()

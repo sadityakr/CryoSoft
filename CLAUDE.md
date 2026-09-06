@@ -69,7 +69,7 @@ README, GLOSSARY entry) and add a conformance test so future work inherits
 it automatically. Existing standards include:
 
 - **Driver contract**: a plain Python class, `__init__` takes a single VISA
-  resource string, importable from `cryosoft.drivers.*`, with `get_idn()`,
+  resource string, importable from `i2as.drivers.*`, with `get_idn()`,
   `close()` and `safe_shutdown()`; every real driver has a sim twin with an
   identical public API that models the instrument's physics (including
   failure modes) so wrong command sequences fail in tests instead of on
@@ -116,7 +116,7 @@ it automatically. Existing standards include:
   Purpose, Architecture layer, Entry, Exit, Interface contract, How to add a
   new module, and Files sections. Update it in the same commit as the code
   change it describes.
-- **Code-reference standard**: comments and docstrings in `cryosoft/` cite
+- **Code-reference standard**: comments and docstrings in `i2as/` cite
   *standards*, never design documents. Name the concept ("the hard status
   separation", "the claim standard") and, if a pointer is needed, point at
   `GLOSSARY.md`, the folder `README.md`, or the owning base class. Never
@@ -126,7 +126,7 @@ it automatically. Existing standards include:
   not have the document. This repository ships no design documents at all;
   the code plus its READMEs, base-class docstrings and `GLOSSARY.md` present
   the complete picture on their own, and the conformance suite fails any
-  plan-document citation under `cryosoft/`. Vendor documentation is the
+  plan-document citation under `i2as/`. Vendor documentation is the
   deliberate exception: an instrument manual's section number
   (`vendor doc §3.11`) is a stable external reference and belongs in the
   driver that implements it.
@@ -176,9 +176,9 @@ term, add it to `GLOSSARY.md` in the same commit.
   Display formatting (mK, µA, mm) is a GUI concern only.
 - **Constants and limits in config, not in code.**
 - **Naming during the extraction**: the package is still importable as
-  `cryosoft` and a later, mechanical rename converts it. In prose the
+  `i2as` and a later, mechanical rename converts it. In prose the
   framework is I2AS; code paths, module names, environment variables
-  (`CRYOSOFT_*`) and commands (`python -m cryosoft.…`) keep their current
+  (`I2AS_*`) and commands (`python -m i2as.…`) keep their current
   spelling until that sweep.
 
 ## Session workflow (optional local practice)

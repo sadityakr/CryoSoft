@@ -22,7 +22,7 @@ a diagnosis is *derived*, not guessed.
 - The main I2AS app must be CLOSED before running any troubleshoot
   command (serial instruments are exclusive-open). Ask the human to close it
   and confirm.
-- Identify the active config: `python -m cryosoft.troubleshoot check --json`
+- Identify the active config: `python -m i2as.troubleshoot check --json`
   prints which config it resolved. Read that config's `setup.md` (instrument
   purposes, wiring notes, known quirks, per-setup safe-test limits) if it
   exists — a quirk there may already explain the symptom.
@@ -33,18 +33,18 @@ a diagnosis is *derived*, not guessed.
    expected, what happened instead, when it started, what changed recently
    (check recent commits, and `LOGBOOK.md` if one is kept).
 2. **Gather passive evidence first** (no instrument I/O): find the log
-   directory — `cryosoft.core.paths.log_directory()` resolves it
-   (default `%LOCALAPPDATA%\CryoSoft\logs` on Windows, overridable via the
-   `CRYOSOFT_LOG_DIR` env var; check that env var first if set) — then tail
-   `cryosoft.log` in that directory around the failure time; check
+   directory — `i2as.core.paths.log_directory()` resolves it
+   (default `%LOCALAPPDATA%\I2AS\logs` on Windows, overridable via the
+   `I2AS_LOG_DIR` env var; check that env var first if set) — then tail
+   `i2as.log` in that directory around the failure time; check
    `troubleshoot.jsonl` there for recent diagnostics; look for `_stale` /
    `_disconnected` flags mentioned in the log. If the symptom is about a
    measurement rather than an instrument, add
-   `python -m cryosoft.troubleshoot session --json` — it reads the newest
+   `python -m i2as.troubleshoot session --json` — it reads the newest
    experiment folder off disk (no instrument touched, safe with the app open)
    and lists its runs, their outcomes and data files, the session envelope,
    and any incident report already filed there.
-3. **Run the preflight:** `python -m cryosoft.troubleshoot check --json`.
+3. **Run the preflight:** `python -m i2as.troubleshoot check --json`.
    Branch on the FaultCodes using `references/triage-tree.md`.
 4. **Narrow with read-only commands** (`scan`, `probe`, `idn`, `read`,
    `methods`, `read --repeat`) before considering anything that writes.

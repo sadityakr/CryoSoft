@@ -1,6 +1,6 @@
 # ---
 # description: |
-#   Tests for cryosoft.core.run_builder — the single headless construction path
+#   Tests for i2as.core.run_builder — the single headless construction path
 #   for a procedure. Covers the kwargs contract, experiment_info normalisation,
 #   the PROCEDURE_BUILD_ERRORS tuple that every caller catches, and the module's
 #   headlessness (no Qt import, buildable with no QApplication).
@@ -11,13 +11,13 @@ import sys
 
 import pytest
 
-from cryosoft.core.exceptions import CryoSoftConfigError, CryoSoftSafetyError
-from cryosoft.core.procedure import BaseProcedure
-from cryosoft.core.run_builder import PROCEDURE_BUILD_ERRORS, build_procedure
-from cryosoft.core.station import build_station
-from cryosoft.procedures.field_sweep import FieldSweep
+from i2as.core.exceptions import I2ASConfigError, I2ASSafetyError
+from i2as.core.procedure import BaseProcedure
+from i2as.core.run_builder import PROCEDURE_BUILD_ERRORS, build_procedure
+from i2as.core.station import build_station
+from i2as.procedures.field_sweep import FieldSweep
 
-CONFIG_PATH = "cryosoft/configs/sim_cryostat"
+CONFIG_PATH = "i2as/configs/sim_cryostat"
 
 SAMPLE_INFO = {"sample_name": "S", "sample_id": "S-1", "comments": ""}
 
@@ -79,13 +79,13 @@ def test_no_qapplication_is_needed(station, tmp_path):
 
 def test_module_imports_no_qt():
     """run_builder must stay importable in a process with no Qt loaded."""
-    import cryosoft.core.run_builder as rb
+    import i2as.core.run_builder as rb
 
     qt_names = [n for n in dir(rb) if "Qt" in n or "QMessage" in n]
     assert qt_names == []
     assert "PyQt6" not in {m.split(".")[0] for m in rb.__dict__.get("__annotations__", {})}
     # The module's own source must not import Qt at all.
-    src = sys.modules["cryosoft.core.run_builder"].__file__
+    src = sys.modules["i2as.core.run_builder"].__file__
     assert src is not None
     with open(src, encoding="utf-8") as fh:
         assert "PyQt6" not in fh.read()
@@ -118,16 +118,16 @@ def test_experiment_info_is_passed_through(station, tmp_path):
 
 # ── The error tuple every caller catches ─────────────────────────────────────
 
-def test_build_errors_tuple_covers_cryosoft_errors():
-    """CryoSoftConfigError/SafetyError derive from CryoSoftError, NOT ValueError.
+def test_build_errors_tuple_covers_i2as_errors():
+    """I2ASConfigError/SafetyError derive from I2ASError, NOT ValueError.
 
     The regression this guards: queue_panel used to catch only
     (TypeError, ValueError), so a procedure refusing a restored run with
-    CryoSoftConfigError escaped into session restore.
+    I2ASConfigError escaped into session restore.
     """
-    assert issubclass(CryoSoftConfigError, PROCEDURE_BUILD_ERRORS)
-    assert issubclass(CryoSoftSafetyError, PROCEDURE_BUILD_ERRORS)
-    assert not issubclass(CryoSoftConfigError, ValueError)
+    assert issubclass(I2ASConfigError, PROCEDURE_BUILD_ERRORS)
+    assert issubclass(I2ASSafetyError, PROCEDURE_BUILD_ERRORS)
+    assert not issubclass(I2ASConfigError, ValueError)
     assert issubclass(TypeError, PROCEDURE_BUILD_ERRORS)
     assert issubclass(ValueError, PROCEDURE_BUILD_ERRORS)
 
@@ -139,7 +139,7 @@ def test_refusal_raises_and_is_caught_by_the_tuple(station, tmp_path):
 
         def __init__(self, **kwargs):
             super().__init__(**kwargs)
-            raise CryoSoftConfigError("this station has no magnet")
+            raise I2ASConfigError("this station has no magnet")
 
     with pytest.raises(PROCEDURE_BUILD_ERRORS):
         build_procedure(

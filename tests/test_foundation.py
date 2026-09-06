@@ -1,13 +1,13 @@
 """Tests for exceptions.py and decorators.py."""
 
 import pytest
-from cryosoft.core.exceptions import (
-    CryoSoftError,
-    CryoSoftCommunicationError,
-    CryoSoftSafetyError,
-    CryoSoftConfigError,
+from i2as.core.exceptions import (
+    I2ASError,
+    I2ASCommunicationError,
+    I2ASSafetyError,
+    I2ASConfigError,
 )
-from cryosoft.core.decorators import (
+from i2as.core.decorators import (
     monitored,
     control,
     get_monitored_methods,
@@ -18,7 +18,7 @@ from cryosoft.core.decorators import (
     get_control_panel,
     get_control_specs,
 )
-from cryosoft.core.plan import ParamSpec
+from i2as.core.plan import ParamSpec
 
 
 # ── Exception tests ──────────────────────────────────────────────────
@@ -27,20 +27,20 @@ class TestExceptionHierarchy:
     """Verify the exception inheritance tree."""
 
     def test_base_exception_is_exception(self):
-        assert issubclass(CryoSoftError, Exception)
+        assert issubclass(I2ASError, Exception)
 
-    def test_communication_error_is_cryosoft_error(self):
-        assert issubclass(CryoSoftCommunicationError, CryoSoftError)
+    def test_communication_error_is_i2as_error(self):
+        assert issubclass(I2ASCommunicationError, I2ASError)
 
-    def test_safety_error_is_cryosoft_error(self):
-        assert issubclass(CryoSoftSafetyError, CryoSoftError)
+    def test_safety_error_is_i2as_error(self):
+        assert issubclass(I2ASSafetyError, I2ASError)
 
-    def test_config_error_is_cryosoft_error(self):
-        assert issubclass(CryoSoftConfigError, CryoSoftError)
+    def test_config_error_is_i2as_error(self):
+        assert issubclass(I2ASConfigError, I2ASError)
 
     def test_communication_error_attributes(self):
         original = ValueError("VISA timeout")
-        err = CryoSoftCommunicationError(
+        err = I2ASCommunicationError(
             "Lost connection to magnet_z",
             vi_name="magnet_z",
             original_error=original,
@@ -50,13 +50,13 @@ class TestExceptionHierarchy:
         assert "Lost connection" in str(err)
 
     def test_communication_error_defaults(self):
-        err = CryoSoftCommunicationError("timeout")
+        err = I2ASCommunicationError("timeout")
         assert err.vi_name == ""
         assert err.original_error is None
 
     def test_safety_error_structured_fields_default_to_none(self):
         """A message-only raise site keeps working; the fields are optional."""
-        err = CryoSoftSafetyError("quench detected")
+        err = I2ASSafetyError("quench detected")
         assert str(err) == "quench detected"
         assert (err.param, err.value, err.lo, err.hi, err.limit_name) == (
             None,
@@ -68,7 +68,7 @@ class TestExceptionHierarchy:
 
     def test_safety_error_carries_a_structured_limit_rejection(self):
         """The limit wrapper's fields survive onto the exception."""
-        err = CryoSoftSafetyError(
+        err = I2ASSafetyError(
             "refused",
             param="current_A",
             value=0.05,
@@ -82,14 +82,14 @@ class TestExceptionHierarchy:
         assert err.hi == 1e-3
         assert err.limit_name == "max_current"
 
-    def test_catch_all_cryosoft_errors(self):
-        """Verify that catching CryoSoftError catches all subtypes."""
-        with pytest.raises(CryoSoftError):
-            raise CryoSoftCommunicationError("test")
-        with pytest.raises(CryoSoftError):
-            raise CryoSoftSafetyError("test")
-        with pytest.raises(CryoSoftError):
-            raise CryoSoftConfigError("test")
+    def test_catch_all_i2as_errors(self):
+        """Verify that catching I2ASError catches all subtypes."""
+        with pytest.raises(I2ASError):
+            raise I2ASCommunicationError("test")
+        with pytest.raises(I2ASError):
+            raise I2ASSafetyError("test")
+        with pytest.raises(I2ASError):
+            raise I2ASConfigError("test")
 
 
 # ── Decorator tests ──────────────────────────────────────────────────

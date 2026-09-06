@@ -25,25 +25,25 @@ from tests.mocks.bus_spy import spy_on_driver
 
 @pytest.fixture
 def ips_driver():
-    from cryosoft.drivers.sim_oxford_ips120 import SimOxfordIPS120
+    from i2as.drivers.sim_oxford_ips120 import SimOxfordIPS120
     return SimOxfordIPS120("SIM")
 
 
 @pytest.fixture
 def source_driver():
-    from cryosoft.drivers.sim_keithley_6221 import SimKeithley6221
+    from i2as.drivers.sim_keithley_6221 import SimKeithley6221
     return SimKeithley6221("SIM")
 
 
 @pytest.fixture
 def meter_driver():
-    from cryosoft.drivers.sim_keithley_2182a import SimKeithley2182A
+    from i2as.drivers.sim_keithley_2182a import SimKeithley2182A
     return SimKeithley2182A("SIM")
 
 
 @pytest.fixture
 def lakeshore_driver():
-    from cryosoft.drivers.sim_lakeshore_335 import SimLakeshore335
+    from i2as.drivers.sim_lakeshore_335 import SimLakeshore335
     return SimLakeshore335("SIM")
 
 
@@ -55,7 +55,7 @@ class TestSuperConductingMagnetVI:
     """Tests for SuperconductingMagnetVI (no switch heater)."""
 
     def _make_vi(self, driver):
-        from cryosoft.virtual_instruments.magnet.superconducting_magnet import SuperconductingMagnetVI
+        from i2as.virtual_instruments.magnet.superconducting_magnet import SuperconductingMagnetVI
         vi = SuperconductingMagnetVI(
             {"main": driver},
             amperes_per_tesla=10.0,
@@ -193,7 +193,7 @@ class TestSampleTemperatureControllerVI:
     """Tests for SampleTemperatureControllerVI."""
 
     def _make_vi(self, driver):
-        from cryosoft.virtual_instruments.temperature.sample_temperature_controller import (
+        from i2as.virtual_instruments.temperature.sample_temperature_controller import (
             SampleTemperatureControllerVI,
         )
         vi = SampleTemperatureControllerVI(
@@ -231,8 +231,8 @@ class TestSampleTemperatureControllerVI:
     def test_temperature_and_rate_limits_from_init_params(self, lakeshore_driver):
         """Config-declared temperature / ramp-rate bounds are enforced on the
         @control entry points (control-validation standard)."""
-        from cryosoft.core.exceptions import CryoSoftSafetyError
-        from cryosoft.virtual_instruments.temperature.sample_temperature_controller import (
+        from i2as.core.exceptions import I2ASSafetyError
+        from i2as.virtual_instruments.temperature.sample_temperature_controller import (
             SampleTemperatureControllerVI,
         )
 
@@ -246,11 +246,11 @@ class TestSampleTemperatureControllerVI:
         )
         vi.vi_name = "temperature_sample"
 
-        with pytest.raises(CryoSoftSafetyError, match="outside the allowed range"):
+        with pytest.raises(I2ASSafetyError, match="outside the allowed range"):
             vi.set_temperature(400.0)
-        with pytest.raises(CryoSoftSafetyError, match="outside the allowed range"):
+        with pytest.raises(I2ASSafetyError, match="outside the allowed range"):
             vi.set_temperature(0.5)
-        with pytest.raises(CryoSoftSafetyError, match="outside the allowed range"):
+        with pytest.raises(I2ASSafetyError, match="outside the allowed range"):
             vi.set_ramp_rate(50.0)
         with pytest.raises(ValueError):
             vi.set_ramp_rate(0.0)  # semantic guard: rate must be positive
@@ -352,10 +352,10 @@ class TestSampleTemperatureControllerVI:
     #    heater mode is MANUAL) --
 
     def test_set_heater_output_rejects_while_auto(self, lakeshore_driver):
-        from cryosoft.core.exceptions import CryoSoftSafetyError
+        from i2as.core.exceptions import I2ASSafetyError
 
         vi = self._make_vi(lakeshore_driver)
-        with pytest.raises(CryoSoftSafetyError, match="AUTO"):
+        with pytest.raises(I2ASSafetyError, match="AUTO"):
             vi.set_heater_output(50.0)
 
     def test_set_heater_output_control(self, lakeshore_driver):
@@ -405,7 +405,7 @@ class TestLakeshore335SampleTemperatureControllerVI:
     """Tests for Lakeshore335SampleTemperatureControllerVI (with calibration curve)."""
 
     def _make_vi(self, driver):
-        from cryosoft.virtual_instruments.temperature.lakeshore_335_sample_temperature_controller import (
+        from i2as.virtual_instruments.temperature.lakeshore_335_sample_temperature_controller import (
             Lakeshore335SampleTemperatureControllerVI,
         )
         vi = Lakeshore335SampleTemperatureControllerVI(
@@ -587,7 +587,7 @@ class TestLakeshore335SampleTemperatureControllerVI:
         assert vi.heater_range() == "MEDIUM"
 
     def test_initiate_heater_range_comes_from_the_config(self, lakeshore_driver):
-        from cryosoft.virtual_instruments.temperature.lakeshore_335_sample_temperature_controller import (
+        from i2as.virtual_instruments.temperature.lakeshore_335_sample_temperature_controller import (
             Lakeshore335SampleTemperatureControllerVI,
         )
 
@@ -598,7 +598,7 @@ class TestLakeshore335SampleTemperatureControllerVI:
         assert vi.heater_range() == "HIGH"
 
     def test_unknown_initiate_heater_range_is_refused(self, lakeshore_driver):
-        from cryosoft.virtual_instruments.temperature.lakeshore_335_sample_temperature_controller import (
+        from i2as.virtual_instruments.temperature.lakeshore_335_sample_temperature_controller import (
             Lakeshore335SampleTemperatureControllerVI,
         )
 
@@ -617,7 +617,7 @@ class TestDCSeparateMeasurementVI:
     """Tests for DCSeparateMeasurementVI."""
 
     def _make_vi(self, source, meter):
-        from cryosoft.virtual_instruments.measurement.dc_separate_measurement import DCSeparateMeasurementVI
+        from i2as.virtual_instruments.measurement.dc_separate_measurement import DCSeparateMeasurementVI
         vi = DCSeparateMeasurementVI({"source": source, "meter": meter})
         vi.vi_name = "dc_measurement"
         return vi
@@ -655,7 +655,7 @@ class TestDCSeparateMeasurementVI:
             vi.take_reading()
 
     def test_inherits_dc_measurement_base(self, source_driver, meter_driver):
-        from cryosoft.virtual_instruments.base import DCMeasurementBase
+        from i2as.virtual_instruments.base import DCMeasurementBase
         vi = self._make_vi(source_driver, meter_driver)
         assert isinstance(vi, DCMeasurementBase)
 

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from cryosoft.core.operational_status import build_operational_status
-from cryosoft.core.stall_detection import (
+from i2as.core.operational_status import build_operational_status
+from i2as.core.stall_detection import (
     StallConfig,
     StallState,
     apply_stall_verdict,

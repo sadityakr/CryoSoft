@@ -14,14 +14,14 @@ import json
 
 import pytest
 
-from cryosoft.core import events as ev
-from cryosoft.core.station import build_station
-from cryosoft.ctl.cli import EXIT_OK, EXIT_REFUSED, main
-from cryosoft.ctl.client import CtlClient, open_client
-from cryosoft.session.gateway import Role
-from cryosoft.session.models import User
+from i2as.core import events as ev
+from i2as.core.station import build_station
+from i2as.ctl.cli import EXIT_OK, EXIT_REFUSED, main
+from i2as.ctl.client import CtlClient, open_client
+from i2as.session.gateway import Role
+from i2as.session.models import User
 
-CONFIG_PATH = "cryosoft/configs/sim_cryostat"
+CONFIG_PATH = "i2as/configs/sim_cryostat"
 
 SAMPLE_INFO = {"sample_name": "S", "sample_id": "S-1", "comments": ""}
 
@@ -41,9 +41,9 @@ FIELD_SWEEP_PARAMS = {
 @pytest.fixture(autouse=True)
 def isolated_installation(tmp_path, monkeypatch):
     """Keep the whole scenario inside this test's own tmp_path."""
-    monkeypatch.setenv("CRYOSOFT_LOG_DIR", str(tmp_path / "logs"))
-    monkeypatch.setenv("CRYOSOFT_MEASUREMENT_ROOT", str(tmp_path / "data"))
-    monkeypatch.setattr("cryosoft.ctl.cli.setup_logging", lambda *a, **k: None)
+    monkeypatch.setenv("I2AS_LOG_DIR", str(tmp_path / "logs"))
+    monkeypatch.setenv("I2AS_MEASUREMENT_ROOT", str(tmp_path / "data"))
+    monkeypatch.setattr("i2as.ctl.cli.setup_logging", lambda *a, **k: None)
 
 
 @pytest.fixture
@@ -54,7 +54,7 @@ def fast_station(monkeypatch):
     cannot wait for it — the same treatment the engine and gateway suites
     give it. Nothing else about the station changes.
     """
-    from cryosoft.ctl import client as ctl_client
+    from i2as.ctl import client as ctl_client
 
     def _build(config_path: str):
         station = build_station(config_path)

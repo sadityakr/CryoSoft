@@ -6,15 +6,15 @@ from typing import ClassVar
 import pytest
 
 
-from cryosoft.core import events as ev
-from cryosoft.core.operational_status import SCHEMA_VERSION
-from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
-from cryosoft.core.plan import Command, ExperimentEnvelope, PhasePlan, StepPlan, Target
-from cryosoft.core.station import Station, build_station
-from cryosoft.procedures.field_sweep import FieldSweep
-from cryosoft.session.run_queue import RunQueue, RunSpec, build_run
-from cryosoft.virtual_instruments.base import BaseVirtualInstrument
-from cryosoft.virtual_instruments.rampable import RampableVI
+from i2as.core import events as ev
+from i2as.core.operational_status import SCHEMA_VERSION
+from i2as.core.orchestrator import Orchestrator, OrchestratorState
+from i2as.core.plan import Command, ExperimentEnvelope, PhasePlan, StepPlan, Target
+from i2as.core.station import Station, build_station
+from i2as.procedures.field_sweep import FieldSweep
+from i2as.session.run_queue import RunQueue, RunSpec, build_run
+from i2as.virtual_instruments.base import BaseVirtualInstrument
+from i2as.virtual_instruments.rampable import RampableVI
 
 
 class MockProcedure:
@@ -82,7 +82,7 @@ def _pause_at_boundary(orchestrator):
 @pytest.fixture
 def station():
     """Build a real simulated station."""
-    config_path = "cryosoft/configs/sim_cryostat"
+    config_path = "i2as/configs/sim_cryostat"
     return build_station(config_path)
 
 
@@ -311,7 +311,7 @@ def test_operational_status_carries_active_safety_condition(orchestrator, statio
 
 
 class _StatusLogCollector(logging.Handler):
-    """Collect the JSON lines the Orchestrator writes to ``cryosoft.status``.
+    """Collect the JSON lines the Orchestrator writes to ``i2as.status``.
 
     Attached directly to the logger rather than read through ``caplog``: the
     real handler is installed with ``propagate=False`` by ``setup_logging()``,
@@ -336,7 +336,7 @@ def _collect_status_lines(orch, ticks: int) -> list[dict]:
     records out before any handler sees them.
     """
     handler = _StatusLogCollector()
-    status_logger = logging.getLogger("cryosoft.status")
+    status_logger = logging.getLogger("i2as.status")
     previous_level = status_logger.level
     status_logger.setLevel(logging.INFO)
     status_logger.addHandler(handler)
@@ -421,15 +421,15 @@ def test_operational_status_written_every_monitored_tick(orchestrator, qtbot):
 
 def test_tick_emits_raw_trend_record(orchestrator, station, qtbot):
     """A tick writes exactly the documented raw-tier JSON shape (see
-    TieredTrendLogger's docstring) to cryosoft.trend_raw, pinning the
+    TieredTrendLogger's docstring) to i2as.trend_raw, pinning the
     "t"/"s"/"v" nesting and the measurement-VI exclusion at the
     orchestrator boundary.
 
-    cryosoft.trend_raw has propagate=False (logging_config.py), so the
+    i2as.trend_raw has propagate=False (logging_config.py), so the
     capturing handler must attach directly to it, not to root. The handler
     is removed in a finally block since loggers are process-global.
     """
-    trend_logger = logging.getLogger("cryosoft.trend_raw")
+    trend_logger = logging.getLogger("i2as.trend_raw")
     records: list[logging.LogRecord] = []
     handler = logging.Handler()
     handler.emit = records.append  # type: ignore[method-assign]
@@ -1863,14 +1863,14 @@ def test_failed_setup_emits_no_manifests(orchestrator, station, qtbot):
 # ── Session envelope enforcement ─────────────────────────────────────────────
 
 def _envelope(**bounds):
-    from cryosoft.core.plan import ExperimentEnvelope
+    from i2as.core.plan import ExperimentEnvelope
 
     return ExperimentEnvelope(bounds=dict(bounds))
 
 
 def test_envelope_rejects_out_of_bounds_target(orchestrator, station, qtbot):
     """A procedure target outside the envelope is rejected before dispatch."""
-    from cryosoft.core.plan import EnvelopeBound
+    from i2as.core.plan import EnvelopeBound
 
     orchestrator.set_experiment_envelope(
         _envelope(magnet_z=EnvelopeBound(min_value=-0.5, max_value=0.5))
@@ -1891,7 +1891,7 @@ def test_envelope_rejects_out_of_bounds_target(orchestrator, station, qtbot):
 
 def test_envelope_allows_within_bounds_and_clears(orchestrator, station, qtbot):
     """Targets inside the envelope run normally; None clears the envelope."""
-    from cryosoft.core.plan import EnvelopeBound
+    from i2as.core.plan import EnvelopeBound
 
     _fast_magnet(station)
     orchestrator.set_experiment_envelope(
@@ -1908,7 +1908,7 @@ def test_envelope_allows_within_bounds_and_clears(orchestrator, station, qtbot):
 
 def test_envelope_state_violation_enters_emergency(orchestrator, station, qtbot):
     """A live reading outside a state_key bound trips EMERGENCY like a safety flag."""
-    from cryosoft.core.plan import EnvelopeBound
+    from i2as.core.plan import EnvelopeBound
 
     # Sim sample thermometer sits at 300 K; a 400 K session minimum is an
     # immediate violation on the next tick.
@@ -1948,7 +1948,7 @@ def test_current_gates_empty_for_procedure_without_gate_methods(orchestrator, st
 
 def test_initiation_gate_replaces_wait_and_blocks_until_satisfied(orchestrator, station):
     """A declared initiation gate is stepped each tick and wait_s is ignored."""
-    from cryosoft.core.gates import Gate
+    from i2as.core.gates import Gate
 
     procedure = MockProcedure(station)
     calls = {"n": 0}
@@ -1992,7 +1992,7 @@ def test_initiation_gate_replaces_wait_and_blocks_until_satisfied(orchestrator, 
 
 def test_reading_gate_used_after_first_measurement_not_initiation(orchestrator, station):
     """reading_gates() governs the second sweep point; the first uses wait_s."""
-    from cryosoft.core.gates import Gate
+    from i2as.core.gates import Gate
 
     procedure = MockProcedure(station)
     calls = {"n": 0}
@@ -2030,7 +2030,7 @@ def test_pause_resume_during_reading_gate_holds_and_resumes(orchestrator, statio
     holds — so a pause here stops on the spot like any other non-MEASURING
     state, and the gate picks up where it left off.
     """
-    from cryosoft.core.gates import Gate
+    from i2as.core.gates import Gate
 
     procedure = MockProcedure(station)
     calls = {"n": 0}
@@ -2069,14 +2069,14 @@ def test_not_responding_refuses_control_via_tag_policy(orchestrator, station, qt
     than a hardcoded ``held.origin == "comm"`` branch.
 
     ``Station.availability()`` (the Availability standard,
-    ``cryosoft.core.availability``) reports the ``not_responding`` tag the
+    ``i2as.core.availability``) reports the ``not_responding`` tag the
     moment a comm-origin hold exists, and ``TAG_POLICY["not_responding"]
     .controllable`` is ``False`` — the same refusal
     ``test_stale_claimed_vi_during_procedure_fails_run_to_idle`` observes
     indirectly through a failed run, checked here directly against
     ``_manual_action_admissible()``.
     """
-    from cryosoft.core.availability import TAG_POLICY
+    from i2as.core.availability import TAG_POLICY
 
     assert TAG_POLICY["not_responding"].controllable is False
 
@@ -2142,7 +2142,7 @@ def test_detached_vi_admitted_by_tag_policy(orchestrator, station):
     """A VI carrying only the ``detached`` tag is admitted, per ``TAG_POLICY``.
 
     ``detached`` (a single-client VI whose session is released between runs
-    — the Availability standard, ``cryosoft.core.availability``) is the
+    — the Availability standard, ``i2as.core.availability``) is the
     least-restrictive tag: ``TAG_POLICY["detached"].controllable`` is
     ``True``, and a detached VI is never a ``_held_vis()`` entry at all (it
     is not a ``Condition``), so it reaches rule 0 with ``held is None`` and
@@ -2151,7 +2151,7 @@ def test_detached_vi_admitted_by_tag_policy(orchestrator, station):
     Availability standard); a duck-typed stand-in exercises
     ``Station._build_availability()``'s existing ``is_attached()`` probe.
     """
-    from cryosoft.core.availability import TAG_POLICY
+    from i2as.core.availability import TAG_POLICY
 
     assert TAG_POLICY["detached"].controllable is True
 
@@ -2412,7 +2412,7 @@ def test_failed_standby_is_retried_and_escalates_exactly_once(station, qtbot, mo
 
         qtbot.waitUntil(magnet_held, timeout=2000)
 
-        with caplog.at_level(logging.CRITICAL, logger="cryosoft.core.orchestrator"):
+        with caplog.at_level(logging.CRITICAL, logger="i2as.core.orchestrator"):
             qtbot.waitUntil(
                 lambda: orch._hold_enforcement_attempts.get("magnet_z", 0) >= 3, timeout=3000
             )
@@ -3908,7 +3908,7 @@ def test_emergency_standby_reaches_the_snapshot_as_a_lifecycle_change(
 
 
 def test_snapshot_reports_a_disconnected_instrument_as_idle(orchestrator, station):
-    """An instrument CryoSoft no longer holds cannot be shown as initiated."""
+    """An instrument I2AS no longer holds cannot be shown as initiated."""
     station.initiate_all()
     orchestrator.disconnect_instrument("magnet_z")
 

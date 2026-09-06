@@ -28,8 +28,8 @@ from typing import Any
 import pytest
 from PyQt6.QtCore import QObject, pyqtSignal
 
-from cryosoft.analysis.report import REPORT_FILENAME
-from cryosoft.gui.analysis_panel import (
+from i2as.analysis.report import REPORT_FILENAME
+from i2as.gui.analysis_panel import (
     ANALYSING_TEXT,
     EXPERIMENT_SUFFIX,
     NO_SESSION_TEXT,
@@ -37,7 +37,7 @@ from cryosoft.gui.analysis_panel import (
     READY_TEXT,
     AnalysisPanel,
 )
-from cryosoft.session.eln.settings import AnalysisSettings, ElnSettings
+from i2as.session.eln.settings import AnalysisSettings, ElnSettings
 
 
 # ── Stub collaborators ────────────────────────────────────────────────────────
@@ -256,7 +256,7 @@ def _write_report(store: StubStore, run_id: str, payload: dict[str, Any]) -> Pat
 
 
 def _fake_discovery(monkeypatch, recipes: tuple[StubRecipeInfo, ...]) -> None:
-    """Install a stub ``cryosoft.analysis.discovery`` module.
+    """Install a stub ``i2as.analysis.discovery`` module.
 
     The real one is built in parallel; the panel imports it lazily by name,
     so a module object in ``sys.modules`` is exactly what it would find.
@@ -268,7 +268,7 @@ def _fake_discovery(monkeypatch, recipes: tuple[StubRecipeInfo, ...]) -> None:
     import sys
     import types
 
-    module = types.ModuleType("cryosoft.analysis.discovery")
+    module = types.ModuleType("i2as.analysis.discovery")
 
     def discover_recipes(extra_dirs=()):  # noqa: ANN001, ANN202 - a stub
         return recipes
@@ -294,7 +294,7 @@ def _fake_discovery(monkeypatch, recipes: tuple[StubRecipeInfo, ...]) -> None:
     module.discover_recipes = discover_recipes
     module.recipe_for = recipe_for
     module.scaffold_recipe = scaffold_recipe
-    monkeypatch.setitem(sys.modules, "cryosoft.analysis.discovery", module)
+    monkeypatch.setitem(sys.modules, "i2as.analysis.discovery", module)
 
 
 # ── The not-wired state ───────────────────────────────────────────────────────
@@ -388,7 +388,7 @@ def test_missing_analysis_package_leaves_an_empty_recipe_list(wired, monkeypatch
     real_import = builtins.__import__
 
     def _refuse(name, *args, **kwargs):  # noqa: ANN001, ANN202 - an import stub
-        if name == "cryosoft.analysis.discovery":
+        if name == "i2as.analysis.discovery":
             raise ImportError(name)
         return real_import(name, *args, **kwargs)
 
@@ -405,11 +405,11 @@ def test_new_recipe_scaffolds_and_offers_it(wired, monkeypatch):
     _fake_discovery(monkeypatch, ())
     opened: list[str] = []
     monkeypatch.setattr(
-        "cryosoft.gui.analysis_panel.QInputDialog.getText",
+        "i2as.gui.analysis_panel.QInputDialog.getText",
         staticmethod(lambda *a, **k: ("hall_bar", True)),
     )
     monkeypatch.setattr(
-        "cryosoft.gui.analysis_panel.QDesktopServices.openUrl",
+        "i2as.gui.analysis_panel.QDesktopServices.openUrl",
         staticmethod(lambda url: opened.append(url.toString())),
     )
     panel.reload()
@@ -543,7 +543,7 @@ def test_analysis_toggle_saves_through_the_publisher(wired, monkeypatch):
     panel, _manager, publisher, _runner = wired
     saved: list[Any] = []
     monkeypatch.setattr(
-        "cryosoft.gui.analysis_panel.persist_eln_settings",
+        "i2as.gui.analysis_panel.persist_eln_settings",
         lambda settings, pub=None: saved.append((settings, pub)) or True,
     )
     panel._enabled_checkbox.setChecked(True)

@@ -10,7 +10,7 @@
 #   both instrument modes (``tests/instrument_modes.py``):
 #
 #       pytest tests/test_scenario_gui.py
-#       CRYOSOFT_INSTRUMENT_THREAD=0 pytest tests/test_scenario_gui.py
+#       I2AS_INSTRUMENT_THREAD=0 pytest tests/test_scenario_gui.py
 #
 #   Passing scenarios are regression tests. A genuine defect is recorded as
 #   ``@pytest.mark.xfail(strict=True, reason="DEFECT: ...")`` with its
@@ -32,21 +32,21 @@ import pytest
 from PyQt6.QtCore import QSettings, QTimer
 from PyQt6.QtWidgets import QApplication, QPushButton
 
-from cryosoft.core import events as ev
-from cryosoft.core.instrument_host import InstrumentHost
-from cryosoft.core.plan import PhasePlan, StepPlan, Target
-from cryosoft.core.request_spool import RequestSpool
-from cryosoft.core.station import build_station
-from cryosoft.gui.monitor_window import MonitorWindow
-from cryosoft.gui.procedure_window import ProcedureWindow
-from cryosoft.procedures.field_sweep import FieldSweep
-from cryosoft.session.eln.publisher import ElnPublisher
-from cryosoft.session.eln.settings import ElnSettings
-from cryosoft.session.eln.sim_eln import SimElnAdapter
-from cryosoft.session.gateway import Gateway, Role, ToolContext, authorize_spooled
-from cryosoft.session.manager import ExperimentManager
-from cryosoft.session.models import User
-from cryosoft.session.store import ExperimentStore, UserRoster
+from i2as.core import events as ev
+from i2as.core.instrument_host import InstrumentHost
+from i2as.core.plan import PhasePlan, StepPlan, Target
+from i2as.core.request_spool import RequestSpool
+from i2as.core.station import build_station
+from i2as.gui.monitor_window import MonitorWindow
+from i2as.gui.procedure_window import ProcedureWindow
+from i2as.procedures.field_sweep import FieldSweep
+from i2as.session.eln.publisher import ElnPublisher
+from i2as.session.eln.settings import ElnSettings
+from i2as.session.eln.sim_eln import SimElnAdapter
+from i2as.session.gateway import Gateway, Role, ToolContext, authorize_spooled
+from i2as.session.manager import ExperimentManager
+from i2as.session.models import User
+from i2as.session.store import ExperimentStore, UserRoster
 from tests import scenarios
 from tests.instrument_modes import (
     JOIN_TIMEOUT_MS,
@@ -59,7 +59,7 @@ from tests.instrument_modes import (
     tick_engine,
 )
 
-CONFIG_PATH = "cryosoft/configs/sim_cryostat"
+CONFIG_PATH = "i2as/configs/sim_cryostat"
 
 SAMPLE_INFO = {"sample_name": "S", "sample_id": "S-1", "comments": ""}
 
@@ -113,9 +113,9 @@ def _fast_magnet(station) -> None:
 @pytest.fixture(autouse=True)
 def isolated_settings(tmp_path, monkeypatch):
     """Redirect the app QSettings factory to a throwaway INI file (see test_gui.py)."""
-    from cryosoft.gui import app_settings
+    from i2as.gui import app_settings
 
-    ini_path = tmp_path / "cryosoft_test_settings.ini"
+    ini_path = tmp_path / "i2as_test_settings.ini"
     monkeypatch.setattr(
         app_settings,
         "get_settings",
@@ -729,7 +729,7 @@ def test_a_card_shows_the_initiate_the_operator_asked_for_from_the_cli(
 ):
     """A command that arrives through the Request spool reaches the card too.
 
-    The out-of-process client (``cryosoft.ctl``) never touches the GUI: it
+    The out-of-process client (``i2as.ctl``) never touches the GUI: it
     drops a request file, the running engine drains it on its next tick, and
     the only thing that can carry the consequence back to the window is the
     ``StatusSnapshot``. Built on its own host because the spool is an engine
@@ -893,7 +893,7 @@ def test_the_agent_panel_shows_an_agents_validate_probe_run_story(
     qtbot.wait(1)  # the row's dynamic property is polished on the next turn
     row_widget = panel._row_widgets[-1]
     label = row_widget.layout().itemAt(0).widget()
-    from cryosoft.gui.agent_panel import OUTCOME_REFUSED
+    from i2as.gui.agent_panel import OUTCOME_REFUSED
 
     assert label.property("outcome") == OUTCOME_REFUSED
 
@@ -991,7 +991,7 @@ def test_probe_first_then_run_queue_yields_a_probe_file_then_the_full_run(
     panel._select_spec(spec.spec_id)
 
     panel.parent()  # no-op, keeps the fixture chain explicit
-    from cryosoft.gui.queue_panel import DEFAULT_PROBE_SPEC
+    from i2as.gui.queue_panel import DEFAULT_PROBE_SPEC
 
     procedure_win.findChild(QPushButton, "queue_probe_btn").click()
     settled(orchestrator)
@@ -1120,7 +1120,7 @@ def test_an_attended_agents_eln_draft_needs_approval_then_the_approve_button_que
         # Attended: drafting is fine but publishing is refused, and the draft
         # is parked on the run record for a human to approve.
         session_manager.set_attended(True)
-        from cryosoft.session.eln.drafting import FakeDraftClient
+        from i2as.session.eln.drafting import FakeDraftClient
 
         context = ToolContext(
             experiments=session_manager,
@@ -1210,7 +1210,7 @@ def test_closing_the_monitor_window_mid_run_shuts_down_bounded_and_the_file_is_r
 
 def _build_and_forget_a_monitor_window() -> None:
     """Show a MonitorWindow while deliberately keeping no reference to it."""
-    from cryosoft.core.orchestrator import Orchestrator
+    from i2as.core.orchestrator import Orchestrator
 
     station = build_station(CONFIG_PATH)
     orch = Orchestrator(station, tick_interval_ms=50)
@@ -1223,7 +1223,7 @@ def test_a_monitor_window_with_no_strong_reference_survives_a_gc_pass(qtbot):
     """A shown window outlives ``gc.collect()`` with no crash — the liveness standard."""
     import gc
 
-    from cryosoft.gui import widget_lifecycle
+    from i2as.gui import widget_lifecycle
 
     _build_and_forget_a_monitor_window()
 

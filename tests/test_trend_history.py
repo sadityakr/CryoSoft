@@ -1,4 +1,4 @@
-"""Tests for cryosoft.core.trend_history."""
+"""Tests for i2as.core.trend_history."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from cryosoft.core.trend_history import (
+from i2as.core.trend_history import (
     TIERS,
     _iter_lines_reverse,
     _order_tier_files_newest_first,
@@ -220,7 +220,7 @@ def test_read_tier_record_straddling_a_small_chunk_boundary_is_not_dropped(
     chunk size to a few bytes, and checks the public contract still holds:
     same records, same ascending order, nothing dropped or corrupted.
     """
-    import cryosoft.core.trend_history as trend_history
+    import i2as.core.trend_history as trend_history
 
     monkeypatch.setattr(trend_history, "_REVERSE_READ_CHUNK_BYTES", 4)
 
@@ -664,7 +664,7 @@ def test_check_evaluation_does_not_scale_with_tier_retention(tmp_path: Path) -> 
     separately bounded tail scan), not all 86,400, and stay well under
     budget.
     """
-    from cryosoft.core.trend_history import read_window, summarize
+    from i2as.core.trend_history import read_window, summarize
 
     now = 2_000_000.0
     keys = _build_realistic_raw_tier(tmp_path, n_keys=30, now=now)

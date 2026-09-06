@@ -8,7 +8,7 @@ assert properties, only pixels catch wrong-looking output.
 
 Input:
     No mandatory arguments. Must run with the project venv python from the
-    repo root (imports the cryosoft package). --out overrides the output dir;
+    repo root (imports the i2as package). --out overrides the output dir;
     --size WxH (e.g. "1920x1080") resizes both windows before capture and is
     applied on top of whatever geometry MonitorWindow/ProcedureWindow chose
     themselves (default: leave their natural size alone).
@@ -77,18 +77,18 @@ def main() -> None:
     from PyQt6.QtTest import QTest
     from PyQt6.QtWidgets import QApplication, QPushButton
 
-    from cryosoft.core.orchestrator import Orchestrator
-    from cryosoft.core.station import build_station
-    from cryosoft.gui.monitor_window import MonitorWindow
-    from cryosoft.gui.procedure_window import ProcedureWindow
-    from cryosoft.gui.theme import PLOT_AXIS, PLOT_BG, build_stylesheet
+    from i2as.core.orchestrator import Orchestrator
+    from i2as.core.station import build_station
+    from i2as.gui.monitor_window import MonitorWindow
+    from i2as.gui.procedure_window import ProcedureWindow
+    from i2as.gui.theme import PLOT_AXIS, PLOT_BG, build_stylesheet
 
     app = QApplication(sys.argv)
     app.setStyleSheet(build_stylesheet())
     pg.setConfigOptions(background=PLOT_BG, foreground=PLOT_AXIS, antialias=True)
 
     tick_ms = 200
-    station = build_station("cryosoft/configs/sim_cryostat")
+    station = build_station("i2as/configs/sim_cryostat")
     orchestrator = Orchestrator(station, tick_interval_ms=tick_ms)
 
     monitor = MonitorWindow(station, orchestrator)

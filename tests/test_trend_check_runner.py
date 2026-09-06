@@ -1,4 +1,4 @@
-"""Tests for cryosoft.core.trend_check_runner."""
+"""Tests for i2as.core.trend_check_runner."""
 
 from __future__ import annotations
 
@@ -7,10 +7,10 @@ from pathlib import Path
 
 import pytest
 
-from cryosoft.core.conditions import decide
-from cryosoft.core.station import Station, build_station
-from cryosoft.core.trend_check_runner import TrendCheckRunner
-from cryosoft.core.trend_checks import CheckOutcome, TrendCheck
+from i2as.core.conditions import decide
+from i2as.core.station import Station, build_station
+from i2as.core.trend_check_runner import TrendCheckRunner
+from i2as.core.trend_checks import CheckOutcome, TrendCheck
 
 
 def _write_jsonl(path: Path, records: list[dict]) -> None:
@@ -42,12 +42,12 @@ def _fixed_verdict_check(name: str, passed: bool) -> TrendCheck:
 
 @pytest.fixture
 def sim_station() -> Station:
-    config_path = Path(__file__).parent.parent / "cryosoft" / "configs" / "sim_cryostat"
+    config_path = Path(__file__).parent.parent / "i2as" / "configs" / "sim_cryostat"
     return build_station(str(config_path))
 
 
 def test_run_once_with_no_checks_is_a_no_op(sim_station: Station, qtbot, tmp_path, monkeypatch):
-    monkeypatch.setenv("CRYOSOFT_LOG_DIR", str(tmp_path))
+    monkeypatch.setenv("I2AS_LOG_DIR", str(tmp_path))
     runner = TrendCheckRunner(sim_station, [], refresh_interval_s=60.0)
     runner.run_once()
     assert sim_station.conditions() == {}
@@ -57,7 +57,7 @@ def test_run_once_with_no_checks_is_a_no_op(sim_station: Station, qtbot, tmp_pat
 def test_run_once_publishes_advisory_condition_for_a_failing_check(
     sim_station: Station, qtbot, tmp_path, monkeypatch
 ):
-    monkeypatch.setenv("CRYOSOFT_LOG_DIR", str(tmp_path))
+    monkeypatch.setenv("I2AS_LOG_DIR", str(tmp_path))
     checks = [_fixed_verdict_check("always_fails", passed=False)]
     runner = TrendCheckRunner(sim_station, checks, refresh_interval_s=60.0)
 
@@ -81,7 +81,7 @@ def test_advisory_trend_condition_leaves_decide_verdict_empty(
     empty, emergency empty, and run_failure None for it — even when the
     watched VI is exactly the one the check concerns.
     """
-    monkeypatch.setenv("CRYOSOFT_LOG_DIR", str(tmp_path))
+    monkeypatch.setenv("I2AS_LOG_DIR", str(tmp_path))
     checks = [_fixed_verdict_check("sample_temperature_stable", passed=False)]
     runner = TrendCheckRunner(sim_station, checks, refresh_interval_s=60.0)
 
@@ -100,7 +100,7 @@ def test_advisory_trend_condition_leaves_decide_verdict_empty(
 
 
 def test_run_once_clears_condition_once_check_passes(sim_station: Station, qtbot, tmp_path, monkeypatch):
-    monkeypatch.setenv("CRYOSOFT_LOG_DIR", str(tmp_path))
+    monkeypatch.setenv("I2AS_LOG_DIR", str(tmp_path))
     failing = [_fixed_verdict_check("flaky", passed=False)]
     runner = TrendCheckRunner(sim_station, failing, refresh_interval_s=60.0)
     runner.run_once()
@@ -119,7 +119,7 @@ def test_trend_refresh_does_not_disturb_safety_conditions(
     sim_station: Station, qtbot, tmp_path, monkeypatch
 ):
     """The 60 s trend cadence and the per-tick safety cadence never wipe each other."""
-    monkeypatch.setenv("CRYOSOFT_LOG_DIR", str(tmp_path))
+    monkeypatch.setenv("I2AS_LOG_DIR", str(tmp_path))
     from tests import scenarios
 
     hold_flag = scenarios.declare_hold_flag(monkeypatch, sim_station)

@@ -1,6 +1,6 @@
 # ---
 # description: |
-#   TEMPLATE — copy into cryosoft/virtual_instruments/measurement/, rename
+#   TEMPLATE — copy into i2as/virtual_instruments/measurement/, rename
 #   the module and class, then fill in every TODO. Delete this header block
 #   and write a real one describing what YOUR instrument/VI actually does
 #   (see any shipped measurement VI for the expected structure: description,
@@ -14,10 +14,10 @@ from __future__ import annotations
 import math
 from typing import Any, ClassVar
 
-from cryosoft.core.decorators import control
-from cryosoft.core.exceptions import CryoSoftConfigError
-from cryosoft.core.plan import ParamSpec
-from cryosoft.virtual_instruments.base import MeasurementInstrumentBase
+from i2as.core.decorators import control
+from i2as.core.exceptions import I2ASConfigError
+from i2as.core.plan import ParamSpec
+from i2as.virtual_instruments.base import MeasurementInstrumentBase
 
 
 class InstrumentNameMeasurementVI(MeasurementInstrumentBase):
@@ -79,7 +79,7 @@ class InstrumentNameMeasurementVI(MeasurementInstrumentBase):
     # under the block name as a (height_px, width_px) numpy array, alongside
     # the scalars; keep a scalar column derived from it so the live plot has
     # something to show. See virtual_instruments/measurement/camera.py.
-    # from cryosoft.core.plan import ImageBlock
+    # from i2as.core.plan import ImageBlock
     # measurement_image_blocks: ClassVar[dict[str, ImageBlock]] = {
     #     "frame": ImageBlock(height_px=128, width_px=128, unit="counts",
     #                         description="TODO what one pixel measures"),
@@ -89,7 +89,7 @@ class InstrumentNameMeasurementVI(MeasurementInstrumentBase):
         """TODO: docstring — what init_params this VI reads.
 
         Raises:
-            CryoSoftConfigError: If init_params are malformed.
+            I2ASConfigError: If init_params are malformed.
         """
         super().__init__(drivers, **init_params)
         self._main = drivers["main"]  # TODO: match your chosen role name(s)

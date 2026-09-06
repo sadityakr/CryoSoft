@@ -12,16 +12,16 @@ import json
 
 import pytest
 
-from cryosoft.core import events as ev
-from cryosoft.core.data_reader import list_columns, open_run, read_metadata, summary_stats
-from cryosoft.core.orchestrator import Orchestrator
-from cryosoft.core.plan import ProbeSpec
-from cryosoft.core.procedure import BaseProcedure
-from cryosoft.core.run_builder import build_procedure
-from cryosoft.core.station import build_station
-from cryosoft.procedures.field_sweep import FieldSweep
+from i2as.core import events as ev
+from i2as.core.data_reader import list_columns, open_run, read_metadata, summary_stats
+from i2as.core.orchestrator import Orchestrator
+from i2as.core.plan import ProbeSpec
+from i2as.core.procedure import BaseProcedure
+from i2as.core.run_builder import build_procedure
+from i2as.core.station import build_station
+from i2as.procedures.field_sweep import FieldSweep
 
-CONFIG_PATH = "cryosoft/configs/sim_cryostat"
+CONFIG_PATH = "i2as/configs/sim_cryostat"
 
 SAMPLE_INFO = {"sample_name": "S", "sample_id": "S-1", "comments": ""}
 

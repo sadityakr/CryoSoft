@@ -2,13 +2,13 @@
 
 The **instrument-thread flag** decides whether the Station and the
 Orchestrator live on their own thread — the default — or on the caller's
-(``cryosoft.core.instrument_host``). Everything above the boundary is
+(``i2as.core.instrument_host``). Everything above the boundary is
 supposed not to care — same proxy, same primed mirror, same signals — and the
 only way to keep that true is to run the same GUI suite both ways. This module
 is what makes that a matter of an environment variable:
 
     pytest tests/test_gui.py                                # threaded
-    CRYOSOFT_INSTRUMENT_THREAD=0 pytest tests/test_gui.py   # inline
+    I2AS_INSTRUMENT_THREAD=0 pytest tests/test_gui.py   # inline
 
 Not a test file. It gives a suite three things:
 
@@ -36,10 +36,10 @@ when ``timeout_s`` is up, and the last of those raises
 tick interval. A wedged suite is then a failing test with a diagnosis instead
 of a process at 100 % CPU that has to be killed.
 
-The default bound is ``CRYOSOFT_TEST_SETTLE_TIMEOUT_S`` seconds (10 s when the
+The default bound is ``I2AS_TEST_SETTLE_TIMEOUT_S`` seconds (10 s when the
 variable is unset), so a slow CI machine can widen every helper at once::
 
-    CRYOSOFT_TEST_SETTLE_TIMEOUT_S=30 pytest tests/test_gui.py
+    I2AS_TEST_SETTLE_TIMEOUT_S=30 pytest tests/test_gui.py
 
 and any single call that legitimately needs longer says so itself::
 
@@ -63,13 +63,13 @@ from typing import Any
 
 from PyQt6.QtCore import QCoreApplication, QEvent, QEventLoop, QObject, QThread
 
-from cryosoft.core.instrument_host import InstrumentHost, resolve_mode
-from cryosoft.core.station import build_station
+from i2as.core.instrument_host import InstrumentHost, resolve_mode
+from i2as.core.station import build_station
 
 #: The environment variable that widens every settle bound in one go, for a
 #: machine slow enough that the default is a false failure. A per-call
 #: ``timeout_s`` overrides it.
-SETTLE_TIMEOUT_ENV_VAR: str = "CRYOSOFT_TEST_SETTLE_TIMEOUT_S"
+SETTLE_TIMEOUT_ENV_VAR: str = "I2AS_TEST_SETTLE_TIMEOUT_S"
 
 #: How long a marshalled call — and, separately, the drain that follows it —
 #: may take before the suite calls it a failure.
@@ -178,7 +178,7 @@ def _engine_diagnosis(client: Any) -> str:
 def instrument_mode() -> str:
     """Return the mode this test session runs in.
 
-    Reads ``CRYOSOFT_INSTRUMENT_THREAD`` alone — a test session has no
+    Reads ``I2AS_INSTRUMENT_THREAD`` alone — a test session has no
     ``monitor.yaml`` to consult, and CI selects the mode by environment.
     Unset means ``threaded``, exactly as it does for the application.
 

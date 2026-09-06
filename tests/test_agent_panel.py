@@ -18,7 +18,7 @@ Built the way the application builds them: a real sim station behind an
 instrument mode (``tests/instrument_modes.py``):
 
     pytest tests/test_agent_panel.py
-    CRYOSOFT_INSTRUMENT_THREAD=1 pytest tests/test_agent_panel.py
+    I2AS_INSTRUMENT_THREAD=1 pytest tests/test_agent_panel.py
 """
 
 from __future__ import annotations
@@ -29,9 +29,9 @@ import time
 import pytest
 from PyQt6.QtCore import QSettings
 
-from cryosoft.core import events as ev
-from cryosoft.core.orchestrator import OrchestratorState
-from cryosoft.gui.agent_panel import (
+from i2as.core import events as ev
+from i2as.core.orchestrator import OrchestratorState
+from i2as.gui.agent_panel import (
     MAX_ROWS,
     NO_RUN_TEXT,
     OUTCOME_PENDING,
@@ -40,16 +40,16 @@ from cryosoft.gui.agent_panel import (
     AgentAction,
     AgentPanel,
 )
-from cryosoft.gui.monitor_window import MonitorWindow
-from cryosoft.gui.theme import (
+from i2as.gui.monitor_window import MonitorWindow
+from i2as.gui.theme import (
     BANNER_ERROR_TEXT,
     BANNER_WARNING_TEXT,
     build_stylesheet,
 )
-from cryosoft.session.gateway import Gateway, Role
+from i2as.session.gateway import Gateway, Role
 from tests.instrument_modes import build_host, engine_of, settled, shutdown_host
 
-CONFIG_PATH = "cryosoft/configs/sim_cryostat"
+CONFIG_PATH = "i2as/configs/sim_cryostat"
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -62,9 +62,9 @@ def isolated_settings(tmp_path, monkeypatch):
     The same dependency seam every GUI suite uses: a pytest run must never
     read or overwrite the user's real saved layout.
     """
-    from cryosoft.gui import app_settings
+    from i2as.gui import app_settings
 
-    ini_path = tmp_path / "cryosoft_test_settings.ini"
+    ini_path = tmp_path / "i2as_test_settings.ini"
     monkeypatch.setattr(
         app_settings,
         "get_settings",
@@ -99,9 +99,9 @@ def orchestrator(instrument_host):
 @pytest.fixture
 def session_manager(tmp_path, orchestrator):
     """A real ExperimentManager over a tmp store, with one roster user."""
-    from cryosoft.session.manager import ExperimentManager
-    from cryosoft.session.models import User
-    from cryosoft.session.store import ExperimentStore, UserRoster
+    from i2as.session.manager import ExperimentManager
+    from i2as.session.models import User
+    from i2as.session.store import ExperimentStore, UserRoster
 
     roster = UserRoster(tmp_path / "users.json")
     roster.add(User(user_id="jdoe", name="J. Doe"))
@@ -291,7 +291,7 @@ def test_a_takeover_row_is_visually_distinct_and_says_whose_run_it_was(
 
 def test_a_takeover_seeded_from_the_feed_reads_the_same(panel):
     """The row model is the same whether it came off the stream or the file."""
-    from cryosoft.gui.agent_panel import action_from_feed_record
+    from i2as.gui.agent_panel import action_from_feed_record
 
     action = action_from_feed_record(
         {
@@ -425,7 +425,7 @@ def test_attendance_without_an_experiment_still_reaches_the_engine(
     station, orchestrator, qtbot
 ):
     """No record to write, and the engine still has to know."""
-    from cryosoft.gui.takeover_strip import TakeoverStrip
+    from i2as.gui.takeover_strip import TakeoverStrip
 
     strip = TakeoverStrip(orchestrator)
     qtbot.addWidget(strip)
@@ -531,9 +531,9 @@ def test_a_missing_feed_seeds_nothing_and_raises_nothing(
 @pytest.fixture
 def publisher(session_manager, orchestrator, tmp_path):
     """A real ELN publisher over the simulated notebook, attached and armed."""
-    from cryosoft.session.eln.publisher import ElnPublisher
-    from cryosoft.session.eln.settings import ElnSettings
-    from cryosoft.session.eln.sim_eln import SimElnAdapter
+    from i2as.session.eln.publisher import ElnPublisher
+    from i2as.session.eln.settings import ElnSettings
+    from i2as.session.eln.sim_eln import SimElnAdapter
 
     experiment = session_manager.start_experiment("Sample A", "jdoe", {})
     data_file = (
@@ -680,7 +680,7 @@ def test_the_header_editor_shows_the_envelope_already_in_force(
     window, session_manager, orchestrator
 ):
     """Reopening the panel on an experiment shows ITS bounds, not the setup's."""
-    from cryosoft.core.plan import EnvelopeBound, ExperimentEnvelope
+    from i2as.core.plan import EnvelopeBound, ExperimentEnvelope
 
     session_manager.start_experiment(
         "Hall bar A3",

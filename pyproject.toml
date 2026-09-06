@@ -3,9 +3,9 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "cryosoft"
+name = "i2as"
 version = "0.1.0"
-description = "Instrument-agnostic cryostat operating system"
+description = "Instrument to Agentic Station: an agent-operable measurement station framework"
 requires-python = ">=3.11"
 dependencies = [
     # Pinned, not a floor. PyQt6 6.11 segfaults the GUI suite on Linux/Python
@@ -24,14 +24,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# LLM drafting of ELN entries (cryosoft/session/eln/drafting.py). Deliberately
+# LLM drafting of ELN entries (i2as/session/eln/drafting.py). Deliberately
 # OPTIONAL: the whole feature is off by default, the package is imported lazily
 # when a real draft client is constructed, and every test runs against
 # FakeDraftClient - so a setup that never drafts installs nothing extra, and a
 # checkout without this extra imports, lints, and tests unchanged. Only
 # `messages.create` is used, which both the 0.x and 1.x SDK lines provide.
 assistant = ["anthropic>=0.40"]
-# Figures in analysis recipes (cryosoft/analysis/). OPTIONAL for the same
+# Figures in analysis recipes (i2as/analysis/). OPTIONAL for the same
 # reason: a recipe that draws nothing needs nothing, matplotlib is imported
 # lazily by the figure helper, and a checkout without it imports, lints and
 # tests unchanged. Listed under dev as well so CI exercises the figure path.
@@ -44,8 +44,8 @@ dev = [
     "import-linter>=2.0",
     "ruff>=0.4",
 ]
-# The MCP adapter's optional stdio framing. `python -m cryosoft.mcp` serves a
-# complete session without it — cryosoft/mcp/shim.py is the reference backend
+# The MCP adapter's optional stdio framing. `python -m i2as.mcp` serves a
+# complete session without it — i2as/mcp/shim.py is the reference backend
 # and the one the tests exercise — so this extra buys the framing from the
 # package that owns the protocol and nothing else. Never make the test suite
 # need it: a transport the tests cannot run is a transport nobody checks.
@@ -60,7 +60,7 @@ markers = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["cryosoft*"]
+include = ["i2as*"]
 
 # ── Ruff (linter) ─────────────────────────────────────────────────────────────
 # Conservative rule set: real errors only (pyflakes F, syntax errors E9).
@@ -82,7 +82,7 @@ select = ["F", "E9"]
 # advisory, not part of the blocking `make check` gate yet.
 [tool.mypy]
 python_version = "3.11"
-packages = ["cryosoft"]
+packages = ["i2as"]
 ignore_missing_imports = true
 
 # ── Import-linter (layer contracts) ───────────────────────────────────────────
@@ -91,318 +91,318 @@ ignore_missing_imports = true
 # (see CLAUDE.md §4 and GLOSSARY.md). If your change violates one of these, the
 # fix is to route through the proper interface, not to edit the contract.
 [tool.importlinter]
-root_package = "cryosoft"
+root_package = "i2as"
 
 [[tool.importlinter.contracts]]
-name = "C1: foundation modules (exceptions/decorators/logging/paths) import nothing from cryosoft"
+name = "C1: foundation modules (exceptions/decorators/logging/paths) import nothing from i2as"
 type = "forbidden"
 source_modules = [
-    "cryosoft.core.exceptions",
-    "cryosoft.core.decorators",
-    "cryosoft.core.logging_config",
-    "cryosoft.core.paths",
+    "i2as.core.exceptions",
+    "i2as.core.decorators",
+    "i2as.core.logging_config",
+    "i2as.core.paths",
 ]
 forbidden_modules = [
-    "cryosoft.drivers",
-    "cryosoft.virtual_instruments",
-    "cryosoft.procedures",
-    "cryosoft.gui",
-    "cryosoft.main",
-    "cryosoft.core.station",
-    "cryosoft.core.orchestrator",
-    "cryosoft.core.procedure",
-    "cryosoft.core.data_manager",
+    "i2as.drivers",
+    "i2as.virtual_instruments",
+    "i2as.procedures",
+    "i2as.gui",
+    "i2as.main",
+    "i2as.core.station",
+    "i2as.core.orchestrator",
+    "i2as.core.procedure",
+    "i2as.core.data_manager",
 ]
 
 [[tool.importlinter.contracts]]
 name = "C2: drivers are leaves — they import only the foundation (plus pyvisa/stdlib)"
 type = "forbidden"
-source_modules = ["cryosoft.drivers"]
+source_modules = ["i2as.drivers"]
 forbidden_modules = [
-    "cryosoft.virtual_instruments",
-    "cryosoft.procedures",
-    "cryosoft.gui",
-    "cryosoft.main",
-    "cryosoft.core.station",
-    "cryosoft.core.orchestrator",
-    "cryosoft.core.procedure",
-    "cryosoft.core.data_manager",
+    "i2as.virtual_instruments",
+    "i2as.procedures",
+    "i2as.gui",
+    "i2as.main",
+    "i2as.core.station",
+    "i2as.core.orchestrator",
+    "i2as.core.procedure",
+    "i2as.core.data_manager",
 ]
 
 [[tool.importlinter.contracts]]
 name = "C3: VIs never import drivers (drivers are injected by the Station) nor anything above"
 type = "forbidden"
-source_modules = ["cryosoft.virtual_instruments"]
+source_modules = ["i2as.virtual_instruments"]
 forbidden_modules = [
-    "cryosoft.drivers",
-    "cryosoft.procedures",
-    "cryosoft.gui",
-    "cryosoft.main",
-    "cryosoft.core.station",
-    "cryosoft.core.orchestrator",
-    "cryosoft.core.procedure",
-    "cryosoft.core.data_manager",
+    "i2as.drivers",
+    "i2as.procedures",
+    "i2as.gui",
+    "i2as.main",
+    "i2as.core.station",
+    "i2as.core.orchestrator",
+    "i2as.core.procedure",
+    "i2as.core.data_manager",
 ]
 
 [[tool.importlinter.contracts]]
 name = "C4: the Station sits below the Orchestrator, procedures, and GUI"
 type = "forbidden"
-source_modules = ["cryosoft.core.station"]
+source_modules = ["i2as.core.station"]
 forbidden_modules = [
-    "cryosoft.core.orchestrator",
-    "cryosoft.core.procedure",
-    "cryosoft.core.data_manager",
-    "cryosoft.procedures",
-    "cryosoft.gui",
-    "cryosoft.main",
+    "i2as.core.orchestrator",
+    "i2as.core.procedure",
+    "i2as.core.data_manager",
+    "i2as.procedures",
+    "i2as.gui",
+    "i2as.main",
 ]
 
 [[tool.importlinter.contracts]]
 name = "C5: the Orchestrator talks only to the Station (and the BaseProcedure interface)"
 type = "forbidden"
-source_modules = ["cryosoft.core.orchestrator"]
+source_modules = ["i2as.core.orchestrator"]
 # The Station legitimately imports VI base classes (C4 allows it); chains that
 # merely pass through the Station are not violations of this contract.
-ignore_imports = ["cryosoft.core.station -> cryosoft.virtual_instruments.*"]
+ignore_imports = ["i2as.core.station -> i2as.virtual_instruments.*"]
 forbidden_modules = [
-    "cryosoft.drivers",
-    "cryosoft.virtual_instruments",
-    "cryosoft.procedures",
-    "cryosoft.gui",
-    "cryosoft.main",
-    "cryosoft.core.data_manager",
+    "i2as.drivers",
+    "i2as.virtual_instruments",
+    "i2as.procedures",
+    "i2as.gui",
+    "i2as.main",
+    "i2as.core.data_manager",
 ]
 
 [[tool.importlinter.contracts]]
 name = "C6: procedures are hardware-blind — no drivers, no VIs, no Orchestrator, no GUI"
 type = "forbidden"
-source_modules = ["cryosoft.procedures", "cryosoft.core.procedure"]
+source_modules = ["i2as.procedures", "i2as.core.procedure"]
 # Same pass-through exemption as C5: procedures may import the Station, and the
 # Station's own VI imports do not make procedures hardware-aware.
-ignore_imports = ["cryosoft.core.station -> cryosoft.virtual_instruments.*"]
+ignore_imports = ["i2as.core.station -> i2as.virtual_instruments.*"]
 forbidden_modules = [
-    "cryosoft.drivers",
-    "cryosoft.virtual_instruments",
-    "cryosoft.core.orchestrator",
-    "cryosoft.gui",
-    "cryosoft.main",
+    "i2as.drivers",
+    "i2as.virtual_instruments",
+    "i2as.core.orchestrator",
+    "i2as.gui",
+    "i2as.main",
 ]
 
 [[tool.importlinter.contracts]]
 name = "C7: the data manager is standalone (foundation + h5py/numpy only)"
 type = "forbidden"
-source_modules = ["cryosoft.core.data_manager"]
+source_modules = ["i2as.core.data_manager"]
 forbidden_modules = [
-    "cryosoft.drivers",
-    "cryosoft.virtual_instruments",
-    "cryosoft.procedures",
-    "cryosoft.gui",
-    "cryosoft.main",
-    "cryosoft.core.station",
-    "cryosoft.core.orchestrator",
-    "cryosoft.core.procedure",
+    "i2as.drivers",
+    "i2as.virtual_instruments",
+    "i2as.procedures",
+    "i2as.gui",
+    "i2as.main",
+    "i2as.core.station",
+    "i2as.core.orchestrator",
+    "i2as.core.procedure",
 ]
 
 [[tool.importlinter.contracts]]
 name = "C8: the GUI never imports drivers or concrete VIs (virtual_instruments.base is the one allowed exception, for @monitored/@control discovery)"
 type = "forbidden"
-source_modules = ["cryosoft.gui"]
+source_modules = ["i2as.gui"]
 forbidden_modules = [
-    "cryosoft.drivers",
-    "cryosoft.virtual_instruments.magnet",
-    "cryosoft.virtual_instruments.temperature",
-    "cryosoft.virtual_instruments.measurement",
-    "cryosoft.virtual_instruments.stage",
+    "i2as.drivers",
+    "i2as.virtual_instruments.magnet",
+    "i2as.virtual_instruments.temperature",
+    "i2as.virtual_instruments.measurement",
+    "i2as.virtual_instruments.stage",
 ]
 
 [[tool.importlinter.contracts]]
-name = "C9: nothing in cryosoft imports the troubleshoot toolbox (a leaf entry point, like main)"
+name = "C9: nothing in i2as imports the troubleshoot toolbox (a leaf entry point, like main)"
 type = "forbidden"
 source_modules = [
-    "cryosoft.core",
-    "cryosoft.drivers",
-    "cryosoft.virtual_instruments",
-    "cryosoft.procedures",
-    "cryosoft.gui",
-    "cryosoft.main",
-    "cryosoft.session",
+    "i2as.core",
+    "i2as.drivers",
+    "i2as.virtual_instruments",
+    "i2as.procedures",
+    "i2as.gui",
+    "i2as.main",
+    "i2as.session",
 ]
-forbidden_modules = ["cryosoft.troubleshoot"]
+forbidden_modules = ["i2as.troubleshoot"]
 
 [[tool.importlinter.contracts]]
 name = "C10: the troubleshoot toolbox talks to drivers and the Station's config helpers only — never to the Orchestrator, procedures, data manager, or GUI"
 type = "forbidden"
-source_modules = ["cryosoft.troubleshoot"]
+source_modules = ["i2as.troubleshoot"]
 # Same pass-through exemption as C5/C6: the Station's own VI imports do not
 # make the troubleshoot package VI-aware.
-ignore_imports = ["cryosoft.core.station -> cryosoft.virtual_instruments.*"]
+ignore_imports = ["i2as.core.station -> i2as.virtual_instruments.*"]
 forbidden_modules = [
-    "cryosoft.core.orchestrator",
-    "cryosoft.core.procedure",
-    "cryosoft.core.data_manager",
-    "cryosoft.procedures",
-    "cryosoft.virtual_instruments",
-    "cryosoft.gui",
-    "cryosoft.main",
+    "i2as.core.orchestrator",
+    "i2as.core.procedure",
+    "i2as.core.data_manager",
+    "i2as.procedures",
+    "i2as.virtual_instruments",
+    "i2as.gui",
+    "i2as.main",
 ]
 
 [[tool.importlinter.contracts]]
 name = "C11: the session layer (L6) sits below the GUI — it imports core downward, never gui/main/drivers/VIs/procedures"
 type = "forbidden"
-source_modules = ["cryosoft.session"]
+source_modules = ["i2as.session"]
 # Same pass-through exemption as C5/C6: the session layer reaches the Station
 # and Orchestrator, whose own VI imports do not make it hardware-aware.
-ignore_imports = ["cryosoft.core.station -> cryosoft.virtual_instruments.*"]
+ignore_imports = ["i2as.core.station -> i2as.virtual_instruments.*"]
 forbidden_modules = [
-    "cryosoft.gui",
-    "cryosoft.main",
-    "cryosoft.drivers",
-    "cryosoft.virtual_instruments",
-    "cryosoft.procedures",
+    "i2as.gui",
+    "i2as.main",
+    "i2as.drivers",
+    "i2as.virtual_instruments",
+    "i2as.procedures",
 ]
 
 [[tool.importlinter.contracts]]
 name = "C12: nothing below the GUI imports the session layer (only gui and main may)"
 type = "forbidden"
 source_modules = [
-    "cryosoft.core",
-    "cryosoft.drivers",
-    "cryosoft.virtual_instruments",
-    "cryosoft.procedures",
-    "cryosoft.troubleshoot",
+    "i2as.core",
+    "i2as.drivers",
+    "i2as.virtual_instruments",
+    "i2as.procedures",
+    "i2as.troubleshoot",
 ]
-forbidden_modules = ["cryosoft.session"]
+forbidden_modules = ["i2as.session"]
 
 [[tool.importlinter.contracts]]
-name = "C13: cryosoft.core.conditions is pure policy — stdlib only, nothing else in cryosoft"
+name = "C13: i2as.core.conditions is pure policy — stdlib only, nothing else in i2as"
 type = "forbidden"
-source_modules = ["cryosoft.core.conditions"]
+source_modules = ["i2as.core.conditions"]
 forbidden_modules = [
-    "cryosoft.drivers",
-    "cryosoft.virtual_instruments",
-    "cryosoft.procedures",
-    "cryosoft.gui",
-    "cryosoft.main",
-    "cryosoft.core.station",
-    "cryosoft.core.orchestrator",
-    "cryosoft.core.plan",
-    "cryosoft.core.data_manager",
+    "i2as.drivers",
+    "i2as.virtual_instruments",
+    "i2as.procedures",
+    "i2as.gui",
+    "i2as.main",
+    "i2as.core.station",
+    "i2as.core.orchestrator",
+    "i2as.core.plan",
+    "i2as.core.data_manager",
 ]
 
 [[tool.importlinter.contracts]]
-name = "C14: cryosoft.core.availability is pure policy — stdlib only, nothing else in cryosoft"
+name = "C14: i2as.core.availability is pure policy — stdlib only, nothing else in i2as"
 type = "forbidden"
-source_modules = ["cryosoft.core.availability"]
+source_modules = ["i2as.core.availability"]
 forbidden_modules = [
-    "cryosoft.drivers",
-    "cryosoft.virtual_instruments",
-    "cryosoft.procedures",
-    "cryosoft.gui",
-    "cryosoft.main",
-    "cryosoft.core.station",
-    "cryosoft.core.orchestrator",
-    "cryosoft.core.plan",
-    "cryosoft.core.data_manager",
-    "cryosoft.core.conditions",
+    "i2as.drivers",
+    "i2as.virtual_instruments",
+    "i2as.procedures",
+    "i2as.gui",
+    "i2as.main",
+    "i2as.core.station",
+    "i2as.core.orchestrator",
+    "i2as.core.plan",
+    "i2as.core.data_manager",
+    "i2as.core.conditions",
 ]
 
 [[tool.importlinter.contracts]]
-name = "C15: cryosoft.core.trend_checks is pure policy — no Qt, no Station/Orchestrator, no drivers/VIs/procedures/GUI"
+name = "C15: i2as.core.trend_checks is pure policy — no Qt, no Station/Orchestrator, no drivers/VIs/procedures/GUI"
 type = "forbidden"
-source_modules = ["cryosoft.core.trend_checks"]
+source_modules = ["i2as.core.trend_checks"]
 forbidden_modules = [
-    "cryosoft.drivers",
-    "cryosoft.virtual_instruments",
-    "cryosoft.procedures",
-    "cryosoft.gui",
-    "cryosoft.main",
-    "cryosoft.core.station",
-    "cryosoft.core.orchestrator",
-    "cryosoft.core.trend_check_runner",
-    "cryosoft.core.plan",
-    "cryosoft.core.data_manager",
+    "i2as.drivers",
+    "i2as.virtual_instruments",
+    "i2as.procedures",
+    "i2as.gui",
+    "i2as.main",
+    "i2as.core.station",
+    "i2as.core.orchestrator",
+    "i2as.core.trend_check_runner",
+    "i2as.core.plan",
+    "i2as.core.data_manager",
 ]
 
 [[tool.importlinter.contracts]]
-name = "C16: cryosoft.core.events is a pure contract — stdlib only, nothing else in cryosoft"
+name = "C16: i2as.core.events is a pure contract — stdlib only, nothing else in i2as"
 type = "forbidden"
-source_modules = ["cryosoft.core.events"]
+source_modules = ["i2as.core.events"]
 forbidden_modules = [
-    "cryosoft.drivers",
-    "cryosoft.virtual_instruments",
-    "cryosoft.procedures",
-    "cryosoft.gui",
-    "cryosoft.main",
-    "cryosoft.core.station",
-    "cryosoft.core.orchestrator",
-    "cryosoft.core.plan",
-    "cryosoft.core.data_manager",
+    "i2as.drivers",
+    "i2as.virtual_instruments",
+    "i2as.procedures",
+    "i2as.gui",
+    "i2as.main",
+    "i2as.core.station",
+    "i2as.core.orchestrator",
+    "i2as.core.plan",
+    "i2as.core.data_manager",
 ]
 
 [[tool.importlinter.contracts]]
-name = "C17: the data reader is standalone — it imports only events/exceptions from cryosoft (plus h5py/numpy/stdlib), so an analysis process can import it alone"
+name = "C17: the data reader is standalone — it imports only events/exceptions from i2as (plus h5py/numpy/stdlib), so an analysis process can import it alone"
 type = "forbidden"
-# The allowlist is exactly `cryosoft.core.events` and `cryosoft.core.exceptions`;
+# The allowlist is exactly `i2as.core.events` and `i2as.core.exceptions`;
 # everything else in the package is enumerated below, because import-linter only
 # matches a forbidden module that is not an ancestor of the source (naming
-# `cryosoft` or `cryosoft.core` here would silently match nothing). A core module
+# `i2as` or `i2as.core` here would silently match nothing). A core module
 # added later is caught by test_l5_data_reader.py's import-allowlist test, which
 # reads the module's own imports rather than a list that has to be maintained.
-source_modules = ["cryosoft.core.data_reader"]
+source_modules = ["i2as.core.data_reader"]
 forbidden_modules = [
-    "cryosoft.drivers",
-    "cryosoft.virtual_instruments",
-    "cryosoft.procedures",
-    "cryosoft.gui",
-    "cryosoft.main",
-    "cryosoft.session",
-    "cryosoft.troubleshoot",
-    "cryosoft.core.availability",
-    "cryosoft.core.conditions",
-    "cryosoft.core.config_catalog",
-    "cryosoft.core.data_manager",
-    "cryosoft.core.decorators",
-    "cryosoft.core.estimates",
-    "cryosoft.core.gates",
-    "cryosoft.core.logging_config",
-    "cryosoft.core.operational_status",
-    "cryosoft.core.orchestrator",
-    "cryosoft.core.paths",
-    "cryosoft.core.plan",
-    "cryosoft.core.procedure",
-    "cryosoft.core.ramps",
-    "cryosoft.core.run_buffer",
-    "cryosoft.core.run_builder",
-    "cryosoft.core.stall_detection",
-    "cryosoft.core.station",
-    "cryosoft.core.sweep_builder",
-    "cryosoft.core.tiered_trend_logger",
-    "cryosoft.core.trend_check_runner",
-    "cryosoft.core.trend_checks",
-    "cryosoft.core.trend_history",
+    "i2as.drivers",
+    "i2as.virtual_instruments",
+    "i2as.procedures",
+    "i2as.gui",
+    "i2as.main",
+    "i2as.session",
+    "i2as.troubleshoot",
+    "i2as.core.availability",
+    "i2as.core.conditions",
+    "i2as.core.config_catalog",
+    "i2as.core.data_manager",
+    "i2as.core.decorators",
+    "i2as.core.estimates",
+    "i2as.core.gates",
+    "i2as.core.logging_config",
+    "i2as.core.operational_status",
+    "i2as.core.orchestrator",
+    "i2as.core.paths",
+    "i2as.core.plan",
+    "i2as.core.procedure",
+    "i2as.core.ramps",
+    "i2as.core.run_buffer",
+    "i2as.core.run_builder",
+    "i2as.core.stall_detection",
+    "i2as.core.station",
+    "i2as.core.sweep_builder",
+    "i2as.core.tiered_trend_logger",
+    "i2as.core.trend_check_runner",
+    "i2as.core.trend_checks",
+    "i2as.core.trend_history",
 ]
 
 [[tool.importlinter.contracts]]
-name = "C18: cryosoft.core.estimates is pure policy — the typed vocabulary and stdlib only"
+name = "C18: i2as.core.estimates is pure policy — the typed vocabulary and stdlib only"
 type = "forbidden"
-source_modules = ["cryosoft.core.estimates"]
+source_modules = ["i2as.core.estimates"]
 forbidden_modules = [
-    "cryosoft.drivers",
-    "cryosoft.virtual_instruments",
-    "cryosoft.procedures",
-    "cryosoft.gui",
-    "cryosoft.main",
-    "cryosoft.session",
-    "cryosoft.core.station",
-    "cryosoft.core.orchestrator",
-    "cryosoft.core.procedure",
-    "cryosoft.core.data_manager",
+    "i2as.drivers",
+    "i2as.virtual_instruments",
+    "i2as.procedures",
+    "i2as.gui",
+    "i2as.main",
+    "i2as.session",
+    "i2as.core.station",
+    "i2as.core.orchestrator",
+    "i2as.core.procedure",
+    "i2as.core.data_manager",
 ]
 
 [[tool.importlinter.contracts]]
 name = "C19: the GUI holds neither the Station nor the Orchestrator — it builds from the StationInfo declaration and acts through the OrchestratorProxy"
 type = "forbidden"
-source_modules = ["cryosoft.gui"]
+source_modules = ["i2as.gui"]
 # Direct imports only: the GUI legitimately imports the Orchestrator, which
 # sits directly on top of the Station, so every indirect chain runs through a
 # layer that is SUPPOSED to hold one. What this contract forbids is a widget
@@ -416,125 +416,125 @@ allow_indirect_imports = "True"
 # type-checking guard, or be the one pure config-FILE helper named there
 # (`validate_config_dir` — it takes no Station and touches no instrument, but
 # needs the classes the Station wires, so it lives beside it; the YAML-only
-# readers live in cryosoft.core.config, C24). A gui module NOT listed here
+# readers live in i2as.core.config, C24). A gui module NOT listed here
 # cannot import the Station at all, which is the property this contract keeps.
 ignore_imports = [
-    "cryosoft.gui.monitor_window -> cryosoft.core.station",
-    "cryosoft.gui.procedure_params_panel -> cryosoft.core.station",
-    "cryosoft.gui.procedure_window -> cryosoft.core.station",
-    "cryosoft.gui.queue_panel -> cryosoft.core.station",
-    "cryosoft.gui.trends_quadrant -> cryosoft.core.station",
+    "i2as.gui.monitor_window -> i2as.core.station",
+    "i2as.gui.procedure_params_panel -> i2as.core.station",
+    "i2as.gui.procedure_window -> i2as.core.station",
+    "i2as.gui.queue_panel -> i2as.core.station",
+    "i2as.gui.trends_quadrant -> i2as.core.station",
     # The state-machine ENUM, not the engine: MonitorWindow names
     # OrchestratorState's members to colour its status bar. Every other GUI
-    # module now imports cryosoft.core.orchestrator_proxy instead, and this
+    # module now imports i2as.core.orchestrator_proxy instead, and this
     # last one goes when the state vocabulary moves into the contract.
-    "cryosoft.gui.monitor_window -> cryosoft.core.orchestrator",
+    "i2as.gui.monitor_window -> i2as.core.orchestrator",
 ]
 forbidden_modules = [
-    "cryosoft.core.station",
-    "cryosoft.core.orchestrator",
+    "i2as.core.station",
+    "i2as.core.orchestrator",
 ]
 
 [[tool.importlinter.contracts]]
-name = "C20: the reference client is a leaf entry point — cryosoft.ctl imports core, the session layer and the troubleshoot toolbox, plus cryosoft.procedures for the run catalog it discovers; never the GUI, drivers or VIs"
+name = "C20: the reference client is a leaf entry point — i2as.ctl imports core, the session layer and the troubleshoot toolbox, plus i2as.procedures for the run catalog it discovers; never the GUI, drivers or VIs"
 type = "forbidden"
-# cryosoft.ctl is an ENTRY POINT, like cryosoft.main: it owns discovery. A run
+# i2as.ctl is an ENTRY POINT, like i2as.main: it owns discovery. A run
 # travels as a class NAME, and neither the engine (C5) nor the session layer
-# (C11) may import cryosoft.procedures, so whoever owns discovery resolves the
+# (C11) may import i2as.procedures, so whoever owns discovery resolves the
 # name and hands the catalog down — which is why that one package above
 # core/session is reachable here and nothing else above them is. Procedures are
 # hardware-blind by C6, so importing them brings no instrument I/O with them.
-source_modules = ["cryosoft.ctl"]
+source_modules = ["i2as.ctl"]
 # Same pass-through exemption as C5/C6/C11: the client reaches the Station and
 # the Orchestrator, whose own VI imports do not make it hardware-aware.
-ignore_imports = ["cryosoft.core.station -> cryosoft.virtual_instruments.*"]
+ignore_imports = ["i2as.core.station -> i2as.virtual_instruments.*"]
 forbidden_modules = [
-    "cryosoft.gui",
-    "cryosoft.main",
-    "cryosoft.drivers",
-    "cryosoft.virtual_instruments",
+    "i2as.gui",
+    "i2as.main",
+    "i2as.drivers",
+    "i2as.virtual_instruments",
 ]
 
 [[tool.importlinter.contracts]]
-name = "C21: the MCP adapter is a separate process that cannot reach an instrument — it imports only stdlib and cryosoft.core.events"
+name = "C21: the MCP adapter is a separate process that cannot reach an instrument — it imports only stdlib and i2as.core.events"
 type = "forbidden"
 # The whole argument for putting the transport out of process is that the
 # module speaking to the outside world CANNOT touch the Station, the
 # Orchestrator or the session layer — mechanically, not by convention. The
-# allowlist is exactly `cryosoft.core.events`, the pure contract; everything
+# allowlist is exactly `i2as.core.events`, the pure contract; everything
 # else in the package is enumerated below, because import-linter only matches a
-# forbidden module that is not an ancestor of the source (naming `cryosoft` or
-# `cryosoft.core` here would silently match nothing). A module added to the
+# forbidden module that is not an ancestor of the source (naming `i2as` or
+# `i2as.core` here would silently match nothing). A module added to the
 # package later is caught by test_mcp_adapter.py's import-allowlist test, which
 # reads the adapter's own imports rather than a list that has to be maintained.
-source_modules = ["cryosoft.mcp"]
+source_modules = ["i2as.mcp"]
 forbidden_modules = [
-    "cryosoft.drivers",
-    "cryosoft.virtual_instruments",
-    "cryosoft.procedures",
-    "cryosoft.gui",
-    "cryosoft.main",
-    "cryosoft.session",
-    "cryosoft.troubleshoot",
-    "cryosoft.core.availability",
-    "cryosoft.core.capability_manifest",
-    "cryosoft.core.conditions",
-    "cryosoft.core.config_catalog",
-    "cryosoft.core.data_manager",
-    "cryosoft.core.data_reader",
-    "cryosoft.core.decorators",
-    "cryosoft.core.estimates",
-    "cryosoft.core.exceptions",
-    "cryosoft.core.gates",
-    "cryosoft.core.instrument_host",
-    "cryosoft.core.logging_config",
-    "cryosoft.core.operational_status",
-    "cryosoft.core.orchestrator",
-    "cryosoft.core.orchestrator_proxy",
-    "cryosoft.core.paths",
-    "cryosoft.core.plan",
-    "cryosoft.core.procedure",
-    "cryosoft.core.ramps",
-    "cryosoft.core.run_buffer",
-    "cryosoft.core.run_builder",
-    "cryosoft.core.stall_detection",
-    "cryosoft.core.station",
-    "cryosoft.core.status_mirror",
-    "cryosoft.core.sweep_builder",
-    "cryosoft.core.tiered_trend_logger",
-    "cryosoft.core.trend_check_runner",
-    "cryosoft.core.trend_checks",
-    "cryosoft.core.trend_history",
+    "i2as.drivers",
+    "i2as.virtual_instruments",
+    "i2as.procedures",
+    "i2as.gui",
+    "i2as.main",
+    "i2as.session",
+    "i2as.troubleshoot",
+    "i2as.core.availability",
+    "i2as.core.capability_manifest",
+    "i2as.core.conditions",
+    "i2as.core.config_catalog",
+    "i2as.core.data_manager",
+    "i2as.core.data_reader",
+    "i2as.core.decorators",
+    "i2as.core.estimates",
+    "i2as.core.exceptions",
+    "i2as.core.gates",
+    "i2as.core.instrument_host",
+    "i2as.core.logging_config",
+    "i2as.core.operational_status",
+    "i2as.core.orchestrator",
+    "i2as.core.orchestrator_proxy",
+    "i2as.core.paths",
+    "i2as.core.plan",
+    "i2as.core.procedure",
+    "i2as.core.ramps",
+    "i2as.core.run_buffer",
+    "i2as.core.run_builder",
+    "i2as.core.stall_detection",
+    "i2as.core.station",
+    "i2as.core.status_mirror",
+    "i2as.core.sweep_builder",
+    "i2as.core.tiered_trend_logger",
+    "i2as.core.trend_check_runner",
+    "i2as.core.trend_checks",
+    "i2as.core.trend_history",
 ]
 
 [[tool.importlinter.contracts]]
-name = "C22: cryosoft.analysis is a standalone analysis stage — it imports only the data reader, the events vocabulary and the exceptions from cryosoft (plus numpy/h5py/stdlib and matplotlib lazily); never the Station, Orchestrator, drivers, VIs, procedures, session layer, GUI, troubleshoot, ctl or mcp"
+name = "C22: i2as.analysis is a standalone analysis stage — it imports only the data reader, the events vocabulary and the exceptions from i2as (plus numpy/h5py/stdlib and matplotlib lazily); never the Station, Orchestrator, drivers, VIs, procedures, session layer, GUI, troubleshoot, ctl or mcp"
 type = "forbidden"
 # The whole argument for putting analysis in its own process is that the
 # module running USER-WRITTEN recipe code CANNOT touch an instrument, edit an
 # experiment record or publish anything — mechanically, not by convention. The
-# allowlist is exactly `cryosoft.core.data_reader`, `cryosoft.core.events` and
-# `cryosoft.core.exceptions`; the modules that would break the property are
+# allowlist is exactly `i2as.core.data_reader`, `i2as.core.events` and
+# `i2as.core.exceptions`; the modules that would break the property are
 # enumerated below, because import-linter only matches a forbidden module that
-# is not an ancestor of the source (naming `cryosoft` or `cryosoft.core` here
+# is not an ancestor of the source (naming `i2as` or `i2as.core` here
 # would silently match nothing). A recipe added to the package later is covered
 # the moment its file exists, since it lives under this same source module.
-source_modules = ["cryosoft.analysis"]
+source_modules = ["i2as.analysis"]
 forbidden_modules = [
-    "cryosoft.core.station",
-    "cryosoft.core.orchestrator",
-    "cryosoft.core.instrument_host",
-    "cryosoft.core.orchestrator_proxy",
-    "cryosoft.core.data_manager",
-    "cryosoft.drivers",
-    "cryosoft.virtual_instruments",
-    "cryosoft.procedures",
-    "cryosoft.session",
-    "cryosoft.gui",
-    "cryosoft.main",
-    "cryosoft.troubleshoot",
-    "cryosoft.ctl",
-    "cryosoft.mcp",
+    "i2as.core.station",
+    "i2as.core.orchestrator",
+    "i2as.core.instrument_host",
+    "i2as.core.orchestrator_proxy",
+    "i2as.core.data_manager",
+    "i2as.drivers",
+    "i2as.virtual_instruments",
+    "i2as.procedures",
+    "i2as.session",
+    "i2as.gui",
+    "i2as.main",
+    "i2as.troubleshoot",
+    "i2as.ctl",
+    "i2as.mcp",
 ]
 
 [[tool.importlinter.contracts]]
@@ -546,42 +546,42 @@ type = "forbidden"
 # import of it from core, a driver, a VI or a procedure would put recipe code —
 # and, through it, matplotlib — on the instrument thread.
 source_modules = [
-    "cryosoft.core",
-    "cryosoft.drivers",
-    "cryosoft.virtual_instruments",
-    "cryosoft.procedures",
-    "cryosoft.troubleshoot",
-    "cryosoft.mcp",
+    "i2as.core",
+    "i2as.drivers",
+    "i2as.virtual_instruments",
+    "i2as.procedures",
+    "i2as.troubleshoot",
+    "i2as.mcp",
 ]
-forbidden_modules = ["cryosoft.analysis"]
+forbidden_modules = ["i2as.analysis"]
 
 [[tool.importlinter.contracts]]
-name = "C24: cryosoft.core.config is the YAML-only config surface — it imports the foundation, the events vocabulary and the request-spool role ladder, never the Station, the engine, drivers, VIs, procedures, GUI or any client"
+name = "C24: i2as.core.config is the YAML-only config surface — it imports the foundation, the events vocabulary and the request-spool role ladder, never the Station, the engine, drivers, VIs, procedures, GUI or any client"
 type = "forbidden"
 # The one module a user reads to learn the config schema, and the one the
 # GUI, the troubleshoot CLI and the reference client may ask a config
 # question of before any Station exists — so it must pull none of them in.
-source_modules = ["cryosoft.core.config"]
+source_modules = ["i2as.core.config"]
 forbidden_modules = [
-    "cryosoft.drivers",
-    "cryosoft.virtual_instruments",
-    "cryosoft.procedures",
-    "cryosoft.gui",
-    "cryosoft.main",
-    "cryosoft.session",
-    "cryosoft.troubleshoot",
-    "cryosoft.ctl",
-    "cryosoft.mcp",
-    "cryosoft.analysis",
-    "cryosoft.core.station",
-    "cryosoft.core.orchestrator",
-    "cryosoft.core.orchestrator_proxy",
-    "cryosoft.core.instrument_host",
-    "cryosoft.core.procedure",
-    "cryosoft.core.data_manager",
-    "cryosoft.core.data_reader",
-    "cryosoft.core.plan",
-    "cryosoft.core.trend_checks",
-    "cryosoft.core.trend_check_runner",
-    "cryosoft.core.capability_manifest",
+    "i2as.drivers",
+    "i2as.virtual_instruments",
+    "i2as.procedures",
+    "i2as.gui",
+    "i2as.main",
+    "i2as.session",
+    "i2as.troubleshoot",
+    "i2as.ctl",
+    "i2as.mcp",
+    "i2as.analysis",
+    "i2as.core.station",
+    "i2as.core.orchestrator",
+    "i2as.core.orchestrator_proxy",
+    "i2as.core.instrument_host",
+    "i2as.core.procedure",
+    "i2as.core.data_manager",
+    "i2as.core.data_reader",
+    "i2as.core.plan",
+    "i2as.core.trend_checks",
+    "i2as.core.trend_check_runner",
+    "i2as.core.capability_manifest",
 ]

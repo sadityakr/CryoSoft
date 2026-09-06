@@ -4,7 +4,7 @@ The module under test deliberately does NOT import the session layer (contract
 C12 forbids it), so it parses ``experiment.json`` from its documented shape.
 These tests close that loop from the other side: the fixtures write their
 records with the session layer's own ``ExperimentStore`` and models — which
-the tests may import, since the contracts bind ``cryosoft.*`` and not
+the tests may import, since the contracts bind ``i2as.*`` and not
 ``tests.*`` — so any drift between the writer and this reader fails here
 rather than in front of an operator.
 """
@@ -18,15 +18,15 @@ from pathlib import Path
 
 import pytest
 
-from cryosoft.core import events as ev
-from cryosoft.core.plan import EnvelopeBound, ExperimentEnvelope, params_digest
-from cryosoft.session.models import (
+from i2as.core import events as ev
+from i2as.core.plan import EnvelopeBound, ExperimentEnvelope, params_digest
+from i2as.session.models import (
     ExperimentRecord,
     RunRecord,
     envelope_to_dict,
 )
-from cryosoft.session.store import ExperimentStore
-from cryosoft.troubleshoot import cli, session_report
+from i2as.session.store import ExperimentStore
+from i2as.troubleshoot import cli, session_report
 
 # The autouse transcript-isolation fixture lives in the CLI test module; import
 # it so `session` invocations here never append to the real log directory.
@@ -347,14 +347,14 @@ def test_defaults_to_most_recently_modified_experiment(
     newer = _write_experiment(session_folder, "20260902_newer")
     os.utime(older / "experiment.json", (1_700_000_000, 1_700_000_000))
     os.utime(newer / "experiment.json", (1_800_000_000, 1_800_000_000))
-    monkeypatch.setenv("CRYOSOFT_MEASUREMENT_ROOT", str(tmp_path))
+    monkeypatch.setenv("I2AS_MEASUREMENT_ROOT", str(tmp_path))
 
     assert cli.main(["session", "--json"]) == 0
     assert _json_out(capsys)["experiment_id"] == "20260902_newer"
 
 
 def test_no_experiment_found_exits_one(tmp_path, monkeypatch, capsys) -> None:
-    monkeypatch.setenv("CRYOSOFT_MEASUREMENT_ROOT", str(tmp_path / "empty"))
+    monkeypatch.setenv("I2AS_MEASUREMENT_ROOT", str(tmp_path / "empty"))
     assert cli.main(["session", "--json"]) == 1
     payload = _json_out(capsys)
     assert payload["available"] is False
@@ -364,7 +364,7 @@ def test_no_experiment_found_exits_one(tmp_path, monkeypatch, capsys) -> None:
 def test_no_experiment_found_human_output_names_where_it_looked(
     tmp_path, monkeypatch, capsys
 ) -> None:
-    monkeypatch.setenv("CRYOSOFT_MEASUREMENT_ROOT", str(tmp_path))
+    monkeypatch.setenv("I2AS_MEASUREMENT_ROOT", str(tmp_path))
     assert cli.main(["session"]) == 1
     out = capsys.readouterr().out
     assert str(tmp_path) in out
@@ -373,7 +373,7 @@ def test_no_experiment_found_human_output_names_where_it_looked(
 
 def test_unconfigured_measurement_root_exits_one(tmp_path, monkeypatch, capsys) -> None:
     """No measurement root configured is reported, not raised as a traceback."""
-    monkeypatch.delenv("CRYOSOFT_MEASUREMENT_ROOT", raising=False)
+    monkeypatch.delenv("I2AS_MEASUREMENT_ROOT", raising=False)
     monkeypatch.setattr(
         cli, "measurement_root", lambda: (_ for _ in ()).throw(RuntimeError("no root here"))
     )

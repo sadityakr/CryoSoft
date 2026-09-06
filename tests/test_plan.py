@@ -4,8 +4,8 @@ import json
 
 import pytest
 
-from cryosoft.core.exceptions import DataSchemaError
-from cryosoft.core.plan import (
+from i2as.core.exceptions import DataSchemaError
+from i2as.core.plan import (
     ImageBlock,
     Command,
     DataSchema,

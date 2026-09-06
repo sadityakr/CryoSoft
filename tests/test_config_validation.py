@@ -10,20 +10,20 @@ from pathlib import Path
 
 import pytest
 
-from cryosoft.core.exceptions import CryoSoftConfigError
-from cryosoft.core.config import read_instrument_metadata
-from cryosoft.core.station import build_station_with_fallback, validate_config_dir
+from i2as.core.exceptions import I2ASConfigError
+from i2as.core.config import read_instrument_metadata
+from i2as.core.station import build_station_with_fallback, validate_config_dir
 
-_SIM_CONFIG = "cryosoft/configs/sim_cryostat"
+_SIM_CONFIG = "i2as/configs/sim_cryostat"
 
 _GOOD_DEVICES = """\
 real_drivers:
   ips_x:
-    class: cryosoft.drivers.sim_oxford_ips120.SimOxfordIPS120
+    class: i2as.drivers.sim_oxford_ips120.SimOxfordIPS120
     address: "SIM::IPS_X"
 virtual_instruments:
   magnet_z:
-    class: cryosoft.virtual_instruments.magnet.superconducting_magnet.SuperconductingMagnetVI
+    class: i2as.virtual_instruments.magnet.superconducting_magnet.SuperconductingMagnetVI
     drivers: {main: ips_x}
     vi_type: system
 """
@@ -63,8 +63,8 @@ def test_unknown_driver_reference_reported(tmp_path):
 def test_unimportable_class_reported(tmp_path):
     """A non-importable driver class is flagged."""
     devices = _GOOD_DEVICES.replace(
-        "cryosoft.drivers.sim_oxford_ips120.SimOxfordIPS120",
-        "cryosoft.drivers.nope.DoesNotExist",
+        "i2as.drivers.sim_oxford_ips120.SimOxfordIPS120",
+        "i2as.drivers.nope.DoesNotExist",
     )
     d = _write(tmp_path / "cfg", devices)
     errors = validate_config_dir(str(d))
@@ -100,7 +100,7 @@ def test_fallback_skips_invalid_uses_next(tmp_path):
 def test_fallback_all_invalid_raises(tmp_path):
     """If nothing is usable, it raises rather than returning a broken station."""
     bad = _write(tmp_path / "bad", "real_drivers: {: broken\n")
-    with pytest.raises(CryoSoftConfigError):
+    with pytest.raises(I2ASConfigError):
         build_station_with_fallback([str(bad)])
 
 
@@ -109,11 +109,11 @@ def test_fallback_all_invalid_raises(tmp_path):
 _DEVICES_WITH_METADATA = """\
 real_drivers:
   ips_x:
-    class: cryosoft.drivers.sim_oxford_ips120.SimOxfordIPS120
+    class: i2as.drivers.sim_oxford_ips120.SimOxfordIPS120
     address: "SIM::IPS_X"
 virtual_instruments:
   magnet_z:
-    class: cryosoft.virtual_instruments.magnet.superconducting_magnet.SuperconductingMagnetVI
+    class: i2as.virtual_instruments.magnet.superconducting_magnet.SuperconductingMagnetVI
     drivers: {main: ips_x}
     vi_type: system
     metadata:
@@ -121,7 +121,7 @@ virtual_instruments:
       manufacturer: Oxford Instruments
       model: IPS120-10
   magnet_y:
-    class: cryosoft.virtual_instruments.magnet.superconducting_magnet.SuperconductingMagnetVI
+    class: i2as.virtual_instruments.magnet.superconducting_magnet.SuperconductingMagnetVI
     drivers: {main: ips_x}
     vi_type: system
 """
@@ -154,7 +154,7 @@ def test_read_instrument_metadata_never_instantiates_anything(tmp_path):
     devices = """\
 virtual_instruments:
   ghost:
-    class: cryosoft.does.not.exist.Ghost
+    class: i2as.does.not.exist.Ghost
     drivers: {}
     vi_type: system
     metadata:
@@ -180,7 +180,7 @@ def test_read_instrument_metadata_ignores_empty_metadata_block(tmp_path):
     devices = """\
 virtual_instruments:
   magnet_z:
-    class: cryosoft.virtual_instruments.magnet.superconducting_magnet.SuperconductingMagnetVI
+    class: i2as.virtual_instruments.magnet.superconducting_magnet.SuperconductingMagnetVI
     drivers: {}
     vi_type: system
     metadata: {}

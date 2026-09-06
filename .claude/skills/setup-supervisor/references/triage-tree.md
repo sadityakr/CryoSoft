@@ -9,7 +9,7 @@ terminal states (software fix / hardware handoff / incident report).
 | Symptom (as humans phrase it) | First moves |
 |---|---|
 | "Instrument X is dead / no reading" | `check --json`; branch on X's FaultCode below |
-| "Values are frozen / not updating" | grep `cryosoft.log` for `_stale` / `disconnected` on that VI; then `read <alias> <getter> --repeat 10` |
+| "Values are frozen / not updating" | grep `i2as.log` for `_stale` / `disconnected` on that VI; then `read <alias> <getter> --repeat 10` |
 | "Readings are intermittent / sometimes fail" | `read --repeat 20 --interval 0.2`, then again `--interval 2`; compare failure rates |
 | "Values are nonsense / wrong magnitude" | `idn <alias>` (is it the right instrument?); `read` the raw getter; compare against the unit conventions (SI everywhere) and the VI's conversion init_params |
 | "App won't start / starts in sim mode unexpectedly" | the startup fallback fired: run `check --config <intended>` — expect `CONFIG_INVALID` or a hardware fault; also read the startup banner text in the log |

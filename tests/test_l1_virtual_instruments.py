@@ -1,15 +1,15 @@
 import pytest
 import time
-from cryosoft.core.exceptions import CryoSoftCommunicationError, CryoSoftSafetyError
+from i2as.core.exceptions import I2ASCommunicationError, I2ASSafetyError
 
 # Assuming we have valid sim drivers from L0 test phase
-from cryosoft.drivers.sim_oxford_ips120 import SimOxfordIPS120
-from cryosoft.drivers.sim_lakeshore_335 import SimLakeshore335
-from cryosoft.drivers.sim_keithley_6221 import SimKeithley6221
-from cryosoft.drivers.sim_keithley_2182a import SimKeithley2182A
+from i2as.drivers.sim_oxford_ips120 import SimOxfordIPS120
+from i2as.drivers.sim_lakeshore_335 import SimLakeshore335
+from i2as.drivers.sim_keithley_6221 import SimKeithley6221
+from i2as.drivers.sim_keithley_2182a import SimKeithley2182A
 
-from cryosoft.virtual_instruments.base import BaseVirtualInstrument
-from cryosoft.core.decorators import monitored, control
+from i2as.virtual_instruments.base import BaseVirtualInstrument
+from i2as.core.decorators import monitored, control
 
 # 1. BaseVirtualInstrument subclass logging/state tests
 class MockBaseVI(BaseVirtualInstrument):
@@ -43,8 +43,8 @@ def test_base_vi_logging_and_state():
 def test_control_specs_and_panel_survive_subclass_wrapping():
     """__init_subclass__ must propagate _control_specs/_control_panel onto the
     limit+logging wrappers, or the GUI would see empty metadata on every VI."""
-    from cryosoft.core.decorators import get_control_panel, get_control_specs
-    from cryosoft.core.plan import ParamSpec
+    from i2as.core.decorators import get_control_panel, get_control_specs
+    from i2as.core.plan import ParamSpec
 
     spec = ParamSpec(type=float, default=0.0, unit="W", min=0.0, max=40.0)
 
@@ -108,7 +108,7 @@ def test_limit_wrapper_refusal_carries_structured_fields():
     vi = LimitedVI()
     vi.vi_name = "source"
 
-    with pytest.raises(CryoSoftSafetyError) as excinfo:
+    with pytest.raises(I2ASSafetyError) as excinfo:
         vi.set_current(0.05)
     err = excinfo.value
 
@@ -147,13 +147,13 @@ def test_communication_error_wrapping(monkeypatch):
             raise FakeVisaIOError("timeout")
 
     vi = MockCommVI({"main": None})
-    with pytest.raises(CryoSoftCommunicationError):
+    with pytest.raises(I2ASCommunicationError):
         vi.fail()
 
 
 # 3b. MeasurementInstrumentBase mean/error/array convention helpers
 def test_mean_and_sem_multiple_samples():
-    from cryosoft.virtual_instruments.base import MeasurementInstrumentBase
+    from i2as.virtual_instruments.base import MeasurementInstrumentBase
 
     mean, sem = MeasurementInstrumentBase.mean_and_sem([1.0, 2.0, 3.0])
     assert mean == pytest.approx(2.0)
@@ -162,7 +162,7 @@ def test_mean_and_sem_multiple_samples():
 
 
 def test_mean_and_sem_single_sample_has_zero_error():
-    from cryosoft.virtual_instruments.base import MeasurementInstrumentBase
+    from i2as.virtual_instruments.base import MeasurementInstrumentBase
 
     mean, sem = MeasurementInstrumentBase.mean_and_sem([5.0])
     assert mean == pytest.approx(5.0)
@@ -170,7 +170,7 @@ def test_mean_and_sem_single_sample_has_zero_error():
 
 
 def test_mean_and_sem_no_samples_is_nan():
-    from cryosoft.virtual_instruments.base import MeasurementInstrumentBase
+    from i2as.virtual_instruments.base import MeasurementInstrumentBase
     import math
 
     mean, sem = MeasurementInstrumentBase.mean_and_sem([])
@@ -179,7 +179,7 @@ def test_mean_and_sem_no_samples_is_nan():
 
 
 def test_quantity_columns_derives_array_mean_error_keys():
-    from cryosoft.virtual_instruments.base import MeasurementInstrumentBase
+    from i2as.virtual_instruments.base import MeasurementInstrumentBase
 
     array_keys, scalar_columns = MeasurementInstrumentBase.quantity_columns(
         "voltage_V", "current_A"
@@ -194,16 +194,16 @@ def test_quantity_columns_derives_array_mean_error_keys():
 
 
 def test_quantity_columns_rejects_colliding_base_name():
-    from cryosoft.core.exceptions import CryoSoftConfigError
-    from cryosoft.virtual_instruments.base import MeasurementInstrumentBase
+    from i2as.core.exceptions import I2ASConfigError
+    from i2as.virtual_instruments.base import MeasurementInstrumentBase
 
-    with pytest.raises(CryoSoftConfigError, match="_array' or '_error'"):
+    with pytest.raises(I2ASConfigError, match="_array' or '_error'"):
         MeasurementInstrumentBase.quantity_columns("voltage_V_error")
 
 
 # 4. Magnet VI tests
 def test_magnet_vi_ramp_cycle():
-    from cryosoft.virtual_instruments.magnet.superconducting_magnet import SuperconductingMagnetVI
+    from i2as.virtual_instruments.magnet.superconducting_magnet import SuperconductingMagnetVI
 
     driver = SimOxfordIPS120("SIM")
     vi = SuperconductingMagnetVI({"main": driver}, default_ramp_rate=1200.0, amperes_per_tesla=10.0)
@@ -220,7 +220,7 @@ def test_magnet_vi_ramp_cycle():
     assert vi.magnet_field_T() == pytest.approx(1.0, abs=0.1)
 
 def test_magnet_vi_ramp_segments():
-    from cryosoft.virtual_instruments.magnet.superconducting_magnet import SuperconductingMagnetVI
+    from i2as.virtual_instruments.magnet.superconducting_magnet import SuperconductingMagnetVI
 
     driver = SimOxfordIPS120("SIM")
     segments = [
@@ -245,7 +245,7 @@ def test_magnet_vi_ramp_segments():
     assert vi.magnet_field_T() == pytest.approx(3.0, abs=0.1)
 
 def test_magnet_vi_safety_clamping():
-    from cryosoft.virtual_instruments.magnet.superconducting_magnet import SuperconductingMagnetVI
+    from i2as.virtual_instruments.magnet.superconducting_magnet import SuperconductingMagnetVI
 
     driver = SimOxfordIPS120("SIM")
     vi = SuperconductingMagnetVI({"main": driver}, max_current=50.0, min_current=-50.0)
@@ -258,7 +258,7 @@ def test_magnet_vi_safety_clamping():
 
 # 10. Temperature VI tests
 def test_temperature_vi_ramp():
-    from cryosoft.virtual_instruments.temperature.sample_temperature_controller import SampleTemperatureControllerVI
+    from i2as.virtual_instruments.temperature.sample_temperature_controller import SampleTemperatureControllerVI
     driver = SimLakeshore335("SIM")
 
     vi = SampleTemperatureControllerVI({"main": driver}, default_ramp_rate=6000.0, tolerance=2.0)
@@ -277,8 +277,8 @@ def test_temperature_vi_set_pid_forwards_to_driver_and_hides_from_card():
 
     Covers both temperature VIs (the VTI VI inherits set_pid unchanged).
     """
-    from cryosoft.core.decorators import get_control_panel
-    from cryosoft.virtual_instruments.temperature.sample_temperature_controller import (
+    from i2as.core.decorators import get_control_panel
+    from i2as.virtual_instruments.temperature.sample_temperature_controller import (
         SampleTemperatureControllerVI,
     )
 
@@ -308,7 +308,7 @@ def test_dc_separate_initiate_recovers_from_stale_delta_arm():
     the shared-instrument mode discipline standard). initiate() must still
     leave the instrument correctly in plain DC mode at the requested current.
     """
-    from cryosoft.virtual_instruments.measurement.dc_separate_measurement import (
+    from i2as.virtual_instruments.measurement.dc_separate_measurement import (
         DCSeparateMeasurementVI,
     )
 
@@ -330,7 +330,7 @@ def test_dc_separate_initiate_recovers_from_stale_delta_arm():
 # 4b. Ramp-introspection standard: ramp_setpoint() — the NEXT setpoint
 def test_rampable_default_ramp_setpoint_is_none():
     """RampableVI's optional hook has a safe default, like every other one."""
-    from cryosoft.virtual_instruments.rampable import RampableVI
+    from i2as.virtual_instruments.rampable import RampableVI
 
     class BareRampable(RampableVI):
         def start_ramp(self, target): ...
@@ -347,7 +347,7 @@ def test_magnet_ramp_setpoint_is_the_segment_boundary_not_the_target():
     This distinction is the whole reason the tracker shows two numbers: the
     PSU is heading for 2 T right now while the ramp finishes at 3 T.
     """
-    from cryosoft.virtual_instruments.magnet.superconducting_magnet import (
+    from i2as.virtual_instruments.magnet.superconducting_magnet import (
         SuperconductingMagnetVI,
     )
 
@@ -381,7 +381,7 @@ def test_magnet_ramp_setpoint_is_the_segment_boundary_not_the_target():
 
 def test_magnet_stop_ramp_clears_the_setpoint():
     """Implementations MUST clear ramp_setpoint() in stop_ramp(), like the target."""
-    from cryosoft.virtual_instruments.magnet.superconducting_magnet import (
+    from i2as.virtual_instruments.magnet.superconducting_magnet import (
         SuperconductingMagnetVI,
     )
 
@@ -397,7 +397,7 @@ def test_magnet_stop_ramp_clears_the_setpoint():
 
 def test_temperature_ramp_setpoint_trails_the_target():
     """A time-based ramp's commanded setpoint walks from start toward target."""
-    from cryosoft.virtual_instruments.temperature.sample_temperature_controller import (
+    from i2as.virtual_instruments.temperature.sample_temperature_controller import (
         SampleTemperatureControllerVI,
     )
 
@@ -424,7 +424,7 @@ def test_temperature_ramp_setpoint_trails_the_target():
 #     __init_subclass__ wrap of standby()/start_ramp()/stop_ramp())
 def test_standby_status_fresh_rampable_vi_is_away():
     """Nothing has commanded standby() yet on a freshly built rampable VI."""
-    from cryosoft.virtual_instruments.magnet.superconducting_magnet import (
+    from i2as.virtual_instruments.magnet.superconducting_magnet import (
         SuperconductingMagnetVI,
     )
 
@@ -436,7 +436,7 @@ def test_standby_status_fresh_rampable_vi_is_away():
 
 def test_standby_status_lifecycle_converging_then_reached():
     """standby() -> converging while the ramp-to-zero is still running, reached once it finishes."""
-    from cryosoft.virtual_instruments.magnet.superconducting_magnet import (
+    from i2as.virtual_instruments.magnet.superconducting_magnet import (
         SuperconductingMagnetVI,
     )
 
@@ -471,7 +471,7 @@ def test_standby_status_start_ramp_after_standby_is_away_even_mid_ramp():
     _standby_commanded flag) would still see the field converging on some
     setpoint here and misreport "converging".
     """
-    from cryosoft.virtual_instruments.magnet.superconducting_magnet import (
+    from i2as.virtual_instruments.magnet.superconducting_magnet import (
         SuperconductingMagnetVI,
     )
 
@@ -495,7 +495,7 @@ def test_standby_status_start_ramp_after_standby_is_away_even_mid_ramp():
 
 
 def test_standby_status_stop_ramp_after_standby_is_away():
-    from cryosoft.virtual_instruments.magnet.superconducting_magnet import (
+    from i2as.virtual_instruments.magnet.superconducting_magnet import (
         SuperconductingMagnetVI,
     )
 
@@ -519,8 +519,8 @@ def test_standby_status_stop_ramp_after_standby_is_away():
 
 def test_standby_status_raising_standby_leaves_it_away():
     """A standby() that raises must not be mistaken for a converging/reached VI."""
-    from cryosoft.virtual_instruments.base import BaseVirtualInstrument
-    from cryosoft.virtual_instruments.rampable import RampableVI
+    from i2as.virtual_instruments.base import BaseVirtualInstrument
+    from i2as.virtual_instruments.rampable import RampableVI
 
     class RaisingStandbyRampable(BaseVirtualInstrument, RampableVI):
         vi_type = "mock"
@@ -552,7 +552,7 @@ def test_standby_status_raising_standby_leaves_it_away():
 
 def test_standby_status_non_rampable_vi_always_reached():
     """A measurement VI (or any non-RampableVI) has no intermediate state to converge through."""
-    from cryosoft.virtual_instruments.measurement.dc_separate_measurement import (
+    from i2as.virtual_instruments.measurement.dc_separate_measurement import (
         DCSeparateMeasurementVI,
     )
 
@@ -573,7 +573,7 @@ def test_standby_status_inherited_standby_still_tracked():
     defined standby()/start_ramp()/stop_ramp() is re-wrapped, so this
     subclass relies entirely on the wrap already applied to its parent.
     """
-    from cryosoft.virtual_instruments.magnet.superconducting_magnet import (
+    from i2as.virtual_instruments.magnet.superconducting_magnet import (
         SuperconductingMagnetVI,
     )
 
@@ -618,15 +618,15 @@ def _minimal_measurement_vi(**namespace):
     Returns:
         The freshly created class (never constructed or registered).
     """
-    from cryosoft.virtual_instruments.base import MeasurementInstrumentBase
+    from i2as.virtual_instruments.base import MeasurementInstrumentBase
 
     return type("ThrowawayMeasurementVI", (MeasurementInstrumentBase,), namespace)
 
 
 def test_measurement_parameters_install_on_arming_control():
     """A bare initiate_measurement inherits every measurement_parameters spec."""
-    from cryosoft.core.decorators import control, get_control_specs
-    from cryosoft.core.plan import ParamSpec
+    from i2as.core.decorators import control, get_control_specs
+    from i2as.core.plan import ParamSpec
 
     specs = {
         "current_A": ParamSpec(type=float, default=1e-6, unit="A", description="I"),
@@ -646,8 +646,8 @@ def test_measurement_parameters_install_on_arming_control():
 
 def test_measurement_parameters_install_on_reading_setter():
     """A reading_setters setter inherits exactly its own single spec."""
-    from cryosoft.core.decorators import control, get_control_specs
-    from cryosoft.core.plan import ParamSpec
+    from i2as.core.decorators import control, get_control_specs
+    from i2as.core.plan import ParamSpec
 
     current_spec = ParamSpec(type=float, default=1e-6, unit="A", description="I")
     specs = {
@@ -674,8 +674,8 @@ def test_measurement_parameters_install_on_reading_setter():
 
 def test_explicit_control_specs_are_not_overwritten():
     """An explicit params= wins; the install only fills a control that declared none."""
-    from cryosoft.core.decorators import control, get_control_specs
-    from cryosoft.core.plan import ParamSpec
+    from i2as.core.decorators import control, get_control_specs
+    from i2as.core.plan import ParamSpec
 
     declared = ParamSpec(type=float, default=0.0, unit="A", description="Declared")
 
@@ -702,8 +702,8 @@ def test_explicit_control_specs_are_not_overwritten():
 
 def test_arming_signature_must_match_measurement_parameters():
     """A signature that drifts from measurement_parameters fails at import."""
-    from cryosoft.core.decorators import control
-    from cryosoft.core.plan import ParamSpec
+    from i2as.core.decorators import control
+    from i2as.core.plan import ParamSpec
 
     @control
     def initiate_measurement(self, current_A=1e-6, stray=1):
@@ -725,7 +725,7 @@ def test_arming_signature_must_match_measurement_parameters():
 
 def test_lifecycle_state_starts_idle_and_follows_the_verbs():
     """A fresh VI is idle; initiate() and standby() move it, in either order."""
-    from cryosoft.virtual_instruments.magnet.superconducting_magnet import (
+    from i2as.virtual_instruments.magnet.superconducting_magnet import (
         SuperconductingMagnetVI,
     )
 
@@ -743,7 +743,7 @@ def test_lifecycle_state_starts_idle_and_follows_the_verbs():
 
 def test_lifecycle_state_resets_to_idle_on_disconnect():
     """The release hook drops the fact with the session (the standard's rule 1)."""
-    from cryosoft.virtual_instruments.magnet.superconducting_magnet import (
+    from i2as.virtual_instruments.magnet.superconducting_magnet import (
         SuperconductingMagnetVI,
     )
 
@@ -776,7 +776,7 @@ def test_lifecycle_state_is_untouched_when_initiate_raises():
 
 def test_lifecycle_state_inherited_verbs_are_still_tracked():
     """A subclass that overrides neither verb inherits the already-wrapped ones."""
-    from cryosoft.virtual_instruments.magnet.superconducting_magnet import (
+    from i2as.virtual_instruments.magnet.superconducting_magnet import (
         SuperconductingMagnetVI,
     )
 
@@ -798,7 +798,7 @@ def test_measurement_vi_arming_counts_as_initiated():
     Its plain ``initiate()`` is only a connection check, so a VI armed by a
     procedure would otherwise still read "idle" while it is sourcing current.
     """
-    from cryosoft.virtual_instruments.measurement.dc_separate_measurement import (
+    from i2as.virtual_instruments.measurement.dc_separate_measurement import (
         DCSeparateMeasurementVI,
     )
 
@@ -816,7 +816,7 @@ def test_measurement_vi_arming_counts_as_initiated():
 
 def test_measurement_vi_plain_initiate_also_counts_as_initiated():
     """The connection-check ``initiate()`` still records the operator's verb."""
-    from cryosoft.virtual_instruments.measurement.dc_separate_measurement import (
+    from i2as.virtual_instruments.measurement.dc_separate_measurement import (
         DCSeparateMeasurementVI,
     )
 

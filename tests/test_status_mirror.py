@@ -10,12 +10,12 @@ import dataclasses
 
 import pytest
 
-from cryosoft.core import events as ev
-from cryosoft.core.orchestrator import Orchestrator
-from cryosoft.core.station import build_station
-from cryosoft.core.status_mirror import StatusMirror
+from i2as.core import events as ev
+from i2as.core.orchestrator import Orchestrator
+from i2as.core.station import build_station
+from i2as.core.status_mirror import StatusMirror
 
-CONFIG_PATH = "cryosoft/configs/sim_cryostat"
+CONFIG_PATH = "i2as/configs/sim_cryostat"
 
 
 @pytest.fixture

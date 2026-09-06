@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from cryosoft.core.availability import (
+from i2as.core.availability import (
     AVAILABILITY_STATES,
     AVAILABILITY_TAGS,
     TAG_POLICY,
@@ -12,13 +12,13 @@ from cryosoft.core.availability import (
     decide_availability,
     state_for,
 )
-from cryosoft.core.conditions import decide
-from cryosoft.core.orchestrator import Orchestrator
-from cryosoft.core.station import Station, build_station
+from i2as.core.conditions import decide
+from i2as.core.orchestrator import Orchestrator
+from i2as.core.station import Station, build_station
 from tests.test_connection_lifecycle import _DetachableDriver, _DetachWhenIdleNoOverrideVI
 from tests.test_l3_orchestrator import _degraded_station
 
-SIM_CONFIG = "cryosoft/configs/sim_cryostat"
+SIM_CONFIG = "i2as/configs/sim_cryostat"
 
 
 # ----------------------------------------------------------------------
@@ -221,7 +221,7 @@ def test_availability_rejects_absent_state_with_no_tags():
 # Tag policy — mechanism checks
 # ============================================================================
 # TAG_POLICY's rows are DESCRIPTIONS of enforcement that lives elsewhere
-# (registry membership, cryosoft.core.conditions.decide(), the Orchestrator's
+# (registry membership, i2as.core.conditions.decide(), the Orchestrator's
 # onset diff, the Availability standard's recovery actions) — the table
 # itself enforces nothing, by design (see core/availability.py's module
 # docstring: "the enforcement... live above this module... out of scope
@@ -332,7 +332,7 @@ def test_controllable_false_for_absent_vi_cannot_be_dispatched_to(station: Stati
 
 
 # ----------------------------------------------------------------------
-# fails_claimed_run: agreement with cryosoft.core.conditions.decide()
+# fails_claimed_run: agreement with i2as.core.conditions.decide()
 # ----------------------------------------------------------------------
 
 

@@ -28,7 +28,7 @@ guesses.
 ### 2. Draft setup.md — the human signs it
 Copy `references/setup-md-template.md` into the config directory as
 `setup.md` and fill it from the interview; the shipped
-`cryosoft/configs/sim_cryostat/setup.md` and `sim_imaging/setup.md` are
+`i2as/configs/sim_cryostat/setup.md` and `sim_imaging/setup.md` are
 filled-in examples of the same template. Present it to the human for
 correction and explicit confirmation before proceeding: this file becomes
 ground truth for every future agent, so an error here propagates forever.
@@ -44,7 +44,7 @@ misleads every later diagnosis.
 
 ### 4. Config
 Create or extend `devices.yaml` (copy the nearer of the two shipped configs
-as the starting point — `cryosoft/configs/sim_cryostat/` for a transport
+as the starting point — `i2as/configs/sim_cryostat/` for a transport
 rack, `sim_imaging/` for a detector over a positioned sample; addresses and
 limits belong in YAML, never in code). For
 every driver entry add `expect_idn` — but only after step 5 has shown the
@@ -54,7 +54,7 @@ real; see CLAUDE.md, "Build bottom-up, test at every layer") — commission
 pauses until the driver exists.
 
 ### 5. Preflight loop
-`python -m cryosoft.troubleshoot check --config <name> --json`, then fix
+`python -m i2as.troubleshoot check --config <name> --json`, then fix
 faults one at a time, following the supervisor triage tree
 (`../setup-supervisor/references/triage-tree.md`): config errors yourself,
 hardware steps as one plain-language instruction at a time to the human.
@@ -75,7 +75,7 @@ answers it:
 
 ### 7. Preflight report and handover
 Write the report to `incidents/YYYY-MM-DD-commissioning-<name>.md` under the
-resolved log directory (`cryosoft.core.paths.log_directory()`; the same
+resolved log directory (`i2as.core.paths.log_directory()`; the same
 folder as incident reports, it is the positive counterpart):
 - table of instruments: address, IDN, FaultCode history during commissioning,
   bench rung reached;

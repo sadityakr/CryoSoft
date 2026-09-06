@@ -12,9 +12,9 @@ from __future__ import annotations
 
 import pytest
 
-from cryosoft.core import events as ev
-from cryosoft.core.station import build_station
-from cryosoft.session.gateway import (
+from i2as.core import events as ev
+from i2as.core.station import build_station
+from i2as.session.gateway import (
     ActionClass,
     Permission,
     Role,
@@ -31,7 +31,7 @@ SESSION = ev.Actor(kind=ev.ActorKind.AGENT, id="runner", role=Role.SESSION.value
 @pytest.fixture(scope="module")
 def station_info():
     """The declaration snapshot of a real simulated station."""
-    return build_station("cryosoft/configs/sim_cryostat").station_info()
+    return build_station("i2as/configs/sim_cryostat").station_info()
 
 
 def _command(name, actor=SESSION, **args):
@@ -259,7 +259,7 @@ def test_emergency_standby_is_permitted_to_every_role_at_every_gate(station_info
 
 def test_the_matrix_is_the_only_thing_that_decides(station_info):
     """Spot-check that the table drives the answer, cell by cell."""
-    from cryosoft.session.gateway import PERMISSION_MATRIX
+    from i2as.session.gateway import PERMISSION_MATRIX
 
     assert PERMISSION_MATRIX[ActionClass.RECOVERY][Role.DEBUG] is (
         Permission.UNATTENDED_ONLY
@@ -289,16 +289,16 @@ class _Recorder:
 @pytest.fixture
 def engine(qtbot):
     """A real Orchestrator over a real simulated station."""
-    from cryosoft.core.orchestrator import Orchestrator
+    from i2as.core.orchestrator import Orchestrator
 
-    station = build_station("cryosoft/configs/sim_cryostat")
+    station = build_station("i2as/configs/sim_cryostat")
     orch = Orchestrator(station, tick_interval_ms=10)
     yield orch, station
     orch.shutdown()
 
 
 def _gateway(engine, role, actor_id="agent-1"):
-    from cryosoft.session.gateway import Gateway
+    from i2as.session.gateway import Gateway
 
     orch, station = engine
     return Gateway(orch, role, actor_id, station_info=station.station_info)
@@ -448,7 +448,7 @@ def test_a_gateway_refusal_orders_after_what_the_engine_said(engine):
 
 def test_the_ceiling_is_read_off_the_matrix_not_a_second_ordering():
     """A deployment's maximum role follows the table that already exists."""
-    from cryosoft.session.gateway import PERMISSION_MATRIX, role_within_ceiling
+    from i2as.session.gateway import PERMISSION_MATRIX, role_within_ceiling
 
     assert role_within_ceiling(Role.OBSERVER, Role.SESSION)
     assert role_within_ceiling(Role.DEBUG, Role.SESSION)
@@ -478,7 +478,7 @@ def test_the_two_contract_streams_are_found_under_either_name():
     the **Gateway server** over the proxy raised at construction because of
     it.
     """
-    from cryosoft.session.gateway.gateway import event_stream, verdict_stream
+    from i2as.session.gateway.gateway import event_stream, verdict_stream
 
     class _Engine:
         verdict_emitted = "engine verdicts"
@@ -496,7 +496,7 @@ def test_the_two_contract_streams_are_found_under_either_name():
 
 def test_an_object_that_is_not_an_engine_client_is_refused_by_name():
     """Neither name means it is not a client at all — say so at the wiring."""
-    from cryosoft.session.gateway.gateway import event_stream, verdict_stream
+    from i2as.session.gateway.gateway import event_stream, verdict_stream
 
     with pytest.raises(AttributeError, match="verdict_emitted nor verdict"):
         verdict_stream(object())
@@ -511,8 +511,8 @@ def test_a_gateway_over_the_proxy_submits_and_is_answered(qtbot, engine):
     instrument thread the same wiring is what ``tests/test_gateway_server.py``
     drives over a real socket.
     """
-    from cryosoft.core.orchestrator_proxy import OrchestratorProxy
-    from cryosoft.session.gateway import Gateway
+    from i2as.core.orchestrator_proxy import OrchestratorProxy
+    from i2as.session.gateway import Gateway
 
     orch, station = engine
     proxy = OrchestratorProxy(orch)
@@ -567,7 +567,7 @@ def test_a_non_owner_agent_is_refused_by_the_ownership_rule(station_info):
 
 def test_every_owner_scoped_command_is_judged_the_same_way(station_info):
     """All four, and nothing else: a recovery action is untouched by ownership."""
-    from cryosoft.session.gateway.roles import OWNER_SCOPED_COMMANDS
+    from i2as.session.gateway.roles import OWNER_SCOPED_COMMANDS
 
     for name in OWNER_SCOPED_COMMANDS:
         verdict = authorize(
@@ -666,8 +666,8 @@ def test_a_debug_agents_override_is_refused_by_the_matrix_not_by_ownership(
 
 def test_the_gateway_mirrors_ownership_from_the_status_snapshot(qtbot, engine, tmp_path):
     """End to end on one engine: agent B is refused locally, and it is in the feed."""
-    from cryosoft.session.agent_feed import AgentFeed, read_feed
-    from cryosoft.session.gateway import Gateway
+    from i2as.session.agent_feed import AgentFeed, read_feed
+    from i2as.session.gateway import Gateway
 
     orch, station = engine
     feed = AgentFeed(tmp_path / "agent_actions.jsonl", "exp-1")

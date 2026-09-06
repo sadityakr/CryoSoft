@@ -1,4 +1,4 @@
-"""Unit tests for the Qt-free config catalog (cryosoft.core.config_catalog).
+"""Unit tests for the Qt-free config catalog (i2as.core.config_catalog).
 
 Exercises discovery, copy-on-edit fork, and named-version save/list/restore
 against throwaway shipped/user directories under tmp_path.
@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from cryosoft.core.config_catalog import ConfigCatalog
+from i2as.core.config_catalog import ConfigCatalog
 
 
 def _make_shipped(base: Path, name: str, devices: str = "real_drivers: {}\n") -> Path:

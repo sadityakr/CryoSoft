@@ -1,4 +1,4 @@
-"""Tests for cryosoft.main's session-tier startup wiring."""
+"""Tests for i2as.main's session-tier startup wiring."""
 
 from __future__ import annotations
 
@@ -6,16 +6,16 @@ from pathlib import Path
 
 import pytest
 
-from cryosoft.main import _ensure_guest_user_registered, _resolve_active_session
-from cryosoft.session.models import GUEST_USER_ID, GUEST_USER_NAME, User
-from cryosoft.session.store import SessionStore, UserRoster, _write_json_atomic
+from i2as.main import _ensure_guest_user_registered, _resolve_active_session
+from i2as.session.models import GUEST_USER_ID, GUEST_USER_NAME, User
+from i2as.session.store import SessionStore, UserRoster, _write_json_atomic
 
 
 def test_resolve_active_session_creates_bootstrap_when_none_active(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """First-ever launch (no active pointer): a bootstrap session is created and activated."""
-    from cryosoft.gui import app_settings
+    from i2as.gui import app_settings
 
     monkeypatch.setattr(app_settings, "current_user_id", lambda: "jdoe")
     store = SessionStore(tmp_path / "sessions")
@@ -34,7 +34,7 @@ def test_resolve_active_session_falls_back_to_guest_when_logged_out(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """No logged-in user yet: the bootstrap session is owned/named by the Guest identity."""
-    from cryosoft.gui import app_settings
+    from i2as.gui import app_settings
 
     monkeypatch.setattr(app_settings, "current_user_id", lambda: None)
     store = SessionStore(tmp_path / "sessions")
@@ -52,7 +52,7 @@ def test_resolve_active_session_returns_existing_active_session(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An already-active, loadable session is returned unchanged — no new session created."""
-    from cryosoft.gui import app_settings
+    from i2as.gui import app_settings
 
     monkeypatch.setattr(app_settings, "current_user_id", lambda: "jdoe")
     store = SessionStore(tmp_path / "sessions")
@@ -69,7 +69,7 @@ def test_resolve_active_session_recovers_from_corrupt_active_pointer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An active pointer naming a session that fails to load is replaced, not fatal."""
-    from cryosoft.gui import app_settings
+    from i2as.gui import app_settings
 
     monkeypatch.setattr(app_settings, "current_user_id", lambda: "jdoe")
     store = SessionStore(tmp_path / "sessions")
@@ -86,7 +86,7 @@ def test_resolve_active_session_recovers_from_legacy_flat_active_pointer_shape(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A pre-per-user-nesting pointer ({"active": "..."}) is treated as unset, not fatal."""
-    from cryosoft.gui import app_settings
+    from i2as.gui import app_settings
 
     monkeypatch.setattr(app_settings, "current_user_id", lambda: "jdoe")
     store = SessionStore(tmp_path / "sessions")

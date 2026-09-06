@@ -1,4 +1,4 @@
-from cryosoft.gui.lifecycle_toggle import LifecycleToggleButton
+from i2as.gui.lifecycle_toggle import LifecycleToggleButton
 
 
 def test_starts_in_standby_state(qtbot):

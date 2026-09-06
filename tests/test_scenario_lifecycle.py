@@ -20,21 +20,21 @@ from typing import Any
 import pytest
 from PyQt6.QtCore import QTimer
 
-from cryosoft.core import events as ev
-from cryosoft.core.data_reader import list_columns, open_run
-from cryosoft.core.instrument_host import InstrumentHost
-from cryosoft.core.plan import PhasePlan, StepPlan
-from cryosoft.core.run_builder import build_procedure
-from cryosoft.core.station import build_station
-from cryosoft.procedures.field_sweep import FieldSweep
-from cryosoft.procedures.temperature_sweep import TemperatureSweep
-from cryosoft.procedures.time_series import TimeSeries
-from cryosoft.session.manager import ExperimentManager
-from cryosoft.session.models import RUN_STATUS_DONE
-from cryosoft.session.store import ExperimentStore, User, UserRoster
+from i2as.core import events as ev
+from i2as.core.data_reader import list_columns, open_run
+from i2as.core.instrument_host import InstrumentHost
+from i2as.core.plan import PhasePlan, StepPlan
+from i2as.core.run_builder import build_procedure
+from i2as.core.station import build_station
+from i2as.procedures.field_sweep import FieldSweep
+from i2as.procedures.temperature_sweep import TemperatureSweep
+from i2as.procedures.time_series import TimeSeries
+from i2as.session.manager import ExperimentManager
+from i2as.session.models import RUN_STATUS_DONE
+from i2as.session.store import ExperimentStore, User, UserRoster
 from tests.instrument_modes import instrument_mode, on_engine, shutdown_host
 
-CONFIG_PATH = "cryosoft/configs/sim_cryostat"
+CONFIG_PATH = "i2as/configs/sim_cryostat"
 
 SAMPLE_INFO = {"sample_name": "S", "sample_id": "S-1", "comments": ""}
 
@@ -667,7 +667,7 @@ def test_a_run_changes_no_declaration_and_every_event_round_trips_through_json(
     ``json.loads`` -> ``event_from_json()`` unchanged, which is the contract
     that lets it cross a thread boundary today and a process boundary later.
     """
-    from cryosoft.core.capability_manifest import build_manifest
+    from i2as.core.capability_manifest import build_manifest
 
     def _declaration() -> tuple[dict[str, Any], dict[str, Any]]:
         return on_engine(

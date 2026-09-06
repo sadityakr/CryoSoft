@@ -1,4 +1,4 @@
-from cryosoft.gui.monitor_history import MonitorHistory
+from i2as.gui.monitor_history import MonitorHistory
 
 
 def test_flattening_matches_last_state_flat_convention():
@@ -131,7 +131,7 @@ def test_record_flat_and_record_interleave_in_timestamp_order():
 
 def test_record_flat_timestamp_none_uses_now(monkeypatch):
     """record_flat(timestamp=None) stamps points with time.time(), matching record()'s convention."""
-    import cryosoft.gui.monitor_history as monitor_history_module
+    import i2as.gui.monitor_history as monitor_history_module
 
     monkeypatch.setattr(monitor_history_module.time, "time", lambda: 12345.0)
 

@@ -1,6 +1,6 @@
 """A driver spy for proving a code path issues no instrument traffic.
 
-Several standards in CryoSoft are "this path must not touch the bus": a VI's
+Several standards in I2AS are "this path must not touch the bus": a VI's
 ``__init__`` (the connection-lifecycle standard's rule 1, construction is
 silent), ``evaluate_safety()`` (it judges the tick snapshot, it does not
 poll), and ``control_param_specs()`` (the purity rule in

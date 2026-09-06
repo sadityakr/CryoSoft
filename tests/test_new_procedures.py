@@ -2,12 +2,12 @@ import h5py
 import numpy as np
 import pytest
 
-from cryosoft.core.plan import Command, PhasePlan, StepPlan, Target
-from cryosoft.core.station import build_station
-from cryosoft.procedures.field_sweep import FieldSweep
-from cryosoft.procedures.temperature_sweep import TemperatureSweep
+from i2as.core.plan import Command, PhasePlan, StepPlan, Target
+from i2as.core.station import build_station
+from i2as.procedures.field_sweep import FieldSweep
+from i2as.procedures.temperature_sweep import TemperatureSweep
 
-CONFIG_PATH = "cryosoft/configs/sim_cryostat"
+CONFIG_PATH = "i2as/configs/sim_cryostat"
 
 SAMPLE_INFO = {
     "sample_name": "Test Sample",
@@ -116,9 +116,9 @@ def test_field_sweep_defaults_to_first_measurement_vi(station, tmp_path):
 
 def test_field_sweep_rejects_non_measurement_vi(station, tmp_path):
     """Selecting a non-measurement VI is refused at construction."""
-    from cryosoft.core.exceptions import CryoSoftConfigError
+    from i2as.core.exceptions import I2ASConfigError
 
-    with pytest.raises(CryoSoftConfigError, match="magnet_z"):
+    with pytest.raises(I2ASConfigError, match="magnet_z"):
         FieldSweep(
             station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
             measurement_vi="magnet_z", **FAST_FIELD,
@@ -244,7 +244,7 @@ def test_field_sweep_abort_disarms_selected_vi(station, tmp_path, meas):
 
 @pytest.mark.parametrize("meas", FIELD_MEAS)
 def test_field_sweep_full_orchestrator_loop(station, tmp_path, qtbot, meas):
-    from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
+    from i2as.core.orchestrator import Orchestrator, OrchestratorState
 
     station.magnet_z._default_ramp_rate = 6000.0
     station.magnet_z._ramp_segments = []
@@ -332,7 +332,7 @@ def test_temp_sweep_run_resets_a_stale_manual_heater_to_auto(station, tmp_path):
     every claimed VI at run start, the closed loop would stay off for the
     whole run and the sweep's ramp target would never actually be reached.
     """
-    from cryosoft.core.orchestrator import Orchestrator
+    from i2as.core.orchestrator import Orchestrator
 
     station.temperature.set_heater_mode("MANUAL")
     assert station.temperature.heater_mode() == "MANUAL"
@@ -347,7 +347,7 @@ def test_temp_sweep_run_resets_a_stale_manual_heater_to_auto(station, tmp_path):
 
 
 def test_temp_sweep_full_orchestrator_loop(station, tmp_path, qtbot):
-    from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
+    from i2as.core.orchestrator import Orchestrator, OrchestratorState
 
     proc = _temp_proc(station, tmp_path, DC)
     orch = Orchestrator(station, tick_interval_ms=10)
@@ -365,7 +365,7 @@ def test_temp_sweep_full_orchestrator_loop(station, tmp_path, qtbot):
 
 def _partial_station(*keep: str):
     """A station containing only the named VIs from the sim config."""
-    from cryosoft.core.station import Station
+    from i2as.core.station import Station
 
     full = build_station(CONFIG_PATH)
     partial = Station()
@@ -394,10 +394,10 @@ def test_temp_sweep_without_a_magnet_runs_at_zero_field(tmp_path):
 
 def test_temp_sweep_without_a_magnet_and_a_nonzero_field_is_refused(tmp_path):
     """A NONZERO field with no magnet configured must fail at construction."""
-    from cryosoft.core.exceptions import CryoSoftConfigError
+    from i2as.core.exceptions import I2ASConfigError
 
     station = _partial_station("temperature", "dc_measurement")
-    with pytest.raises(CryoSoftConfigError, match="configures no"):
+    with pytest.raises(I2ASConfigError, match="configures no"):
         TemperatureSweep(
             station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
             **{**FAST_TEMP, **DC, "field": 0.5},
@@ -406,10 +406,10 @@ def test_temp_sweep_without_a_magnet_and_a_nonzero_field_is_refused(tmp_path):
 
 def test_temp_sweep_without_a_temperature_controller_is_refused(tmp_path):
     """The swept role is REQUIRED: no candidate means no run, said at construction."""
-    from cryosoft.core.exceptions import CryoSoftConfigError
+    from i2as.core.exceptions import I2ASConfigError
 
     station = _partial_station("magnet_z", "dc_measurement")
-    with pytest.raises(CryoSoftConfigError, match="temperature_vi"):
+    with pytest.raises(I2ASConfigError, match="temperature_vi"):
         TemperatureSweep(
             station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
             **FAST_TEMP, **DC,
@@ -425,7 +425,7 @@ def test_wrong_shape_reading_degrades_to_error(station, tmp_path, qtbot, monkeyp
     DataSchemaError before anything is written; the Orchestrator's tick boundary
     contains it to ERROR and cleans up. The datapoint is never saved.
     """
-    from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
+    from i2as.core.orchestrator import Orchestrator, OrchestratorState
 
     station.magnet_z._default_ramp_rate = 6000.0
     station.magnet_z._ramp_segments = []
@@ -539,9 +539,9 @@ def test_value_slot_metadata_carries_label_map(station, tmp_path):
 
 def test_value_slot_bad_entry_refused(station, tmp_path):
     """An entry that does not parse as the parameter's type fails loudly."""
-    from cryosoft.core.exceptions import CryoSoftConfigError
+    from i2as.core.exceptions import I2ASConfigError
 
-    with pytest.raises(CryoSoftConfigError, match="abc"):
+    with pytest.raises(I2ASConfigError, match="abc"):
         _field_proc(
             station, tmp_path,
             {**DC, "loop1_parameter": "dc_measurement.current_A",
@@ -551,9 +551,9 @@ def test_value_slot_bad_entry_refused(station, tmp_path):
 
 def test_non_loopable_parameter_refused(station, tmp_path):
     """Looping a parameter no VI advertised a setter for fails at construction."""
-    from cryosoft.core.exceptions import CryoSoftConfigError
+    from i2as.core.exceptions import I2ASConfigError
 
-    with pytest.raises(CryoSoftConfigError, match="voltmeter_range_V"):
+    with pytest.raises(I2ASConfigError, match="voltmeter_range_V"):
         _field_proc(
             station, tmp_path,
             {**DC, "loop1_parameter": "dc_measurement.voltmeter_range_V",
@@ -563,9 +563,9 @@ def test_non_loopable_parameter_refused(station, tmp_path):
 
 def test_same_parameter_in_both_slots_refused(station, tmp_path):
     """The same loopable parameter cannot occupy both slots."""
-    from cryosoft.core.exceptions import CryoSoftConfigError
+    from i2as.core.exceptions import I2ASConfigError
 
-    with pytest.raises(CryoSoftConfigError, match="both"):
+    with pytest.raises(I2ASConfigError, match="both"):
         _field_proc(
             station, tmp_path,
             {**DC,
@@ -626,7 +626,7 @@ def test_live_plot_keys_stay_plain_and_loop_labels_drive_the_selectors(station):
 
 def test_full_orchestrator_run_value_slot(station, tmp_path, qtbot):
     """A +/- current sweep completes to IDLE with a real loop1 axis."""
-    from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
+    from i2as.core.orchestrator import Orchestrator, OrchestratorState
 
     station.magnet_z._default_ramp_rate = 6000.0
     station.magnet_z._ramp_segments = []
@@ -681,10 +681,10 @@ def test_field_sweep_without_a_temperature_controller_runs(tmp_path):
 
 def test_field_sweep_without_a_magnet_is_refused(tmp_path):
     """The swept role is REQUIRED: no magnet means no run, said at construction."""
-    from cryosoft.core.exceptions import CryoSoftConfigError
+    from i2as.core.exceptions import I2ASConfigError
 
     station = _partial_station("temperature", "dc_measurement")
-    with pytest.raises(CryoSoftConfigError, match="field_vi"):
+    with pytest.raises(I2ASConfigError, match="field_vi"):
         FieldSweep(
             station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
             **FAST_FIELD, **DC,
@@ -693,9 +693,9 @@ def test_field_sweep_without_a_magnet_is_refused(tmp_path):
 
 def test_field_sweep_rejects_a_role_the_station_does_not_have(station, tmp_path):
     """A named instrument that is not of that role is refused, not guessed at."""
-    from cryosoft.core.exceptions import CryoSoftConfigError
+    from i2as.core.exceptions import I2ASConfigError
 
-    with pytest.raises(CryoSoftConfigError, match="field_vi"):
+    with pytest.raises(I2ASConfigError, match="field_vi"):
         FieldSweep(
             station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
             **{**FAST_FIELD, **DC, "field_vi": "temperature"},

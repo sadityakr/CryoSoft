@@ -1,6 +1,6 @@
 # ---
 # description: |
-#   Tests for cryosoft.session.run_queue — the run queue as data. Covers the
+#   Tests for i2as.session.run_queue — the run queue as data. Covers the
 #   RunSpec contract (frozen, JSON round trip, actor), RunQueue ordering,
 #   build_run's construction shape, and validate_run's three checks (declared ParamSpec
 #   bounds, the headless build, control_limits + the session envelope).
@@ -11,11 +11,11 @@ import json
 
 import pytest
 
-from cryosoft.core.events import OPERATOR, Actor, ActorKind
-from cryosoft.core.plan import EnvelopeBound, ExperimentEnvelope
-from cryosoft.core.station import build_station
-from cryosoft.procedures.field_sweep import FieldSweep
-from cryosoft.session.run_queue import (
+from i2as.core.events import OPERATOR, Actor, ActorKind
+from i2as.core.plan import EnvelopeBound, ExperimentEnvelope
+from i2as.core.station import build_station
+from i2as.procedures.field_sweep import FieldSweep
+from i2as.session.run_queue import (
     FINDING_BUILD_REFUSED,
     FINDING_CONTROL_LIMIT,
     FINDING_ENVELOPE,
@@ -31,7 +31,7 @@ from cryosoft.session.run_queue import (
     validate_run,
 )
 
-CONFIG_PATH = "cryosoft/configs/sim_cryostat"
+CONFIG_PATH = "i2as/configs/sim_cryostat"
 
 AGENT = Actor(kind=ActorKind.AGENT, id="drift-watch", role="operator")
 

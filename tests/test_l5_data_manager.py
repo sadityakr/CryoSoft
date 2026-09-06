@@ -4,7 +4,7 @@ import h5py
 import numpy as np
 import pytest
 
-from cryosoft.core.data_manager import DataManager
+from i2as.core.data_manager import DataManager
 
 
 # ── Shared fixtures ───────────────────────────────────────────────────────────

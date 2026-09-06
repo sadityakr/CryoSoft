@@ -14,15 +14,15 @@ import time
 import numpy as np
 import pytest
 
-from cryosoft.core import sim_environment
-from cryosoft.core.exceptions import CryoSoftConfigError, CryoSoftSafetyError
-from cryosoft.core.station import build_station
-from cryosoft.drivers.sim_camera import SimCamera
-from cryosoft.drivers.sim_xy_stage import SimXYStage
-from cryosoft.virtual_instruments.base import StageBase
-from cryosoft.virtual_instruments.stage.stage_axis import StageAxisVI
+from i2as.core import sim_environment
+from i2as.core.exceptions import I2ASConfigError, I2ASSafetyError
+from i2as.core.station import build_station
+from i2as.drivers.sim_camera import SimCamera
+from i2as.drivers.sim_xy_stage import SimXYStage
+from i2as.virtual_instruments.base import StageBase
+from i2as.virtual_instruments.stage.stage_axis import StageAxisVI
 
-IMAGING_CONFIG = "cryosoft/configs/sim_imaging"
+IMAGING_CONFIG = "i2as/configs/sim_imaging"
 
 
 def _elapse(driver: SimXYStage, seconds: float) -> None:
@@ -61,13 +61,13 @@ class TestStageAxisVI:
         assert vi.setpoint_unit == "m"
 
     def test_unknown_axis_is_refused_at_construction(self, stage_driver):
-        with pytest.raises(CryoSoftConfigError):
+        with pytest.raises(I2ASConfigError):
             _axis(stage_driver, "z")
 
     def test_limits_come_from_the_config(self, stage_driver):
         vi = _axis(stage_driver)
         assert vi.limit_bounds("position_m") == (-5e-3, 5e-3)
-        with pytest.raises(CryoSoftSafetyError):
+        with pytest.raises(I2ASSafetyError):
             vi.set_position(6e-3)
         assert stage_driver.get_target() == (0.0, 0.0)
         unbounded = StageAxisVI({"main": stage_driver}, axis="x")
@@ -172,11 +172,11 @@ class TestStageOnTheStation:
         assert station.system_setpoint_meta("stage_y") == ("y position", "m")
 
     def test_the_sim_cryostat_has_no_stage(self):
-        assert build_station("cryosoft/configs/sim_cryostat").stage_vi_names() == []
+        assert build_station("i2as/configs/sim_cryostat").stage_vi_names() == []
 
     def test_a_stage_move_shows_in_the_ramp_status(self):
         station = build_station(IMAGING_CONFIG)
-        station.process_system_targets({"stage_x": __import__("cryosoft.core.plan", fromlist=["Target"]).Target(1e-3)})
+        station.process_system_targets({"stage_x": __import__("i2as.core.plan", fromlist=["Target"]).Target(1e-3)})
         status = station.get_ramp_status()["stage_x"]
         assert status["ramp_status"] == "RAMPING"
         assert status["target"] == pytest.approx(1e-3)
@@ -204,7 +204,7 @@ def world(camera_resource):
 
 
 def _camera(driver, **params):
-    from cryosoft.virtual_instruments.measurement.camera import CameraMeasurementVI
+    from i2as.virtual_instruments.measurement.camera import CameraMeasurementVI
 
     vi = CameraMeasurementVI({"main": driver}, **params)
     vi.vi_name = "camera"
@@ -213,7 +213,7 @@ def _camera(driver, **params):
 
 class TestCameraMeasurementVI:
     def test_declares_one_image_block_at_the_sensor_size(self, camera_driver):
-        from cryosoft.virtual_instruments.measurement.camera import CameraMeasurementVI
+        from i2as.virtual_instruments.measurement.camera import CameraMeasurementVI
 
         block = CameraMeasurementVI.measurement_image_blocks["frame"]
         assert block.shape == camera_driver.get_sensor_size()
@@ -231,7 +231,7 @@ class TestCameraMeasurementVI:
 
     @pytest.mark.parametrize("roi", [[0, 0, 0, 1], [100, 0, 40, 40], [0, 0, 129, 1], [1, 2, 3]])
     def test_a_roi_outside_the_sensor_is_refused_at_construction(self, camera_driver, roi):
-        with pytest.raises(CryoSoftConfigError):
+        with pytest.raises(I2ASConfigError):
             _camera(camera_driver, roi=roi)
 
     def test_arming_configures_and_arms_the_camera(self, camera_driver):
@@ -297,7 +297,7 @@ class TestCameraMeasurementVI:
     def test_exposure_limit_comes_from_the_config(self, camera_driver):
         vi = _camera(camera_driver, min_exposure_s=1e-3, max_exposure_s=0.1)
         assert vi.limit_bounds("exposure_s") == (1e-3, 0.1)
-        with pytest.raises(CryoSoftSafetyError):
+        with pytest.raises(I2ASSafetyError):
             vi.initiate_measurement(exposure_s=1.0, binning=1, frames_per_step=1)
         assert not camera_driver.is_armed()
 

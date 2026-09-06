@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from cryosoft.core.conditions import (
+from i2as.core.conditions import (
     ORIGINS,
     SEVERITIES,
     Condition,
