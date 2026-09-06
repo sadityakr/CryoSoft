@@ -182,7 +182,9 @@ The written standards all live in this root and are enforced by
   config by `test_vi_lifecycle_state_is_declared_and_follows_the_verbs` and
   `test_vi_lifecycle_state_is_a_pure_read` (the latter watches the drivers, so
   a read that polled fails).
-- A `vi_type` class attribute (`system` / `measurement` / `level`).
+- A `vi_type` class attribute (`magnet` / `temperature` / `stage` /
+  `measurement`), inherited from the typed base — the category role
+  discovery asks `Station.vi_names_by_base()` for.
 - The control-validation standard: bounded `@control` parameters declared in
   `control_limits`, limit values populated from `init_params`, enforced by the
   base class before the hardware call. Coverage is machine-checked, not
@@ -253,9 +255,12 @@ The written standards all live in this root and are enforced by
 ## How to add a new module
 1. Pick the `vi_type` and open that subfolder's README for the local recipe.
 2. Subclass the right base (`MagnetBase`, `TemperatureControllerBase`,
-   `MeasurementInstrumentBase` / `DCMeasurementBase`, or
+   `StageBase`, `MeasurementInstrumentBase` / `DCMeasurementBase`, or
    `BaseVirtualInstrument` directly for a category with no base yet),
-   adding `RampableVI` if it ramps.
+   adding `RampableVI` if it ramps. A rampable VI carries ONE scalar
+   setpoint — the `Target` it receives, the `target_*` parameter the
+   envelope binds — so a multi-axis instrument is one VI per axis
+   (`stage/README.md`).
 3. Tag reads `@monitored(unit=..., description=...)` and actions `@control`;
    declare `control_limits` for any bounded parameter and read the value from
    `init_params` (a numeric control with no limit fails conformance unless
@@ -274,8 +279,8 @@ The written standards all live in this root and are enforced by
 Shared contracts at the root; concrete classes live in the subfolders.
 
 - `base.py` — `BaseVirtualInstrument` plus the typed sub-bases `MagnetBase`,
-  `TemperatureControllerBase`,
-  `MeasurementInstrumentBase`, `DCMeasurementBase`. Provides `__init_subclass__` auto-wrapping of
+  `TemperatureControllerBase`, `StageBase` (one positioned axis; `axis`
+  names which), `MeasurementInstrumentBase`, `DCMeasurementBase`. Provides `__init_subclass__` auto-wrapping of
   `@monitored`/`@control` (structured logging + declarative limit enforcement),
   `get_state()` (which also fills the monitor-cycle cache `last_monitored()`
   serves), `control_limit_bounds()` (the read side of the control-validation
@@ -314,7 +319,8 @@ Shared contracts at the root; concrete classes live in the subfolders.
 - `__init__.py` — package marker (docstring only). tests: none.
 - `magnet/` — superconducting magnet PSU VIs (field ramp).
 - `temperature/` — temperature controller VIs.
-- `level/` — cryogen level meter VIs.
-- `measurement/` — electrical transport measurement-method VIs (DC).
+- `stage/` — sample-positioning VIs (one rampable VI per axis).
+- `measurement/` — measurement-method VIs: DC transport and the widefield
+  camera (the shipped image-block example).
 
 Each subfolder has its own `README.md` with the per-file map for that `vi_type`.

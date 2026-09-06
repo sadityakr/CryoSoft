@@ -1,7 +1,7 @@
 """BaseVirtualInstrument and category base classes.
 
 All VIs inherit from BaseVirtualInstrument (and possibly one of the typed
-sub-bases: MagnetBase, TemperatureControllerBase,
+sub-bases: MagnetBase, TemperatureControllerBase, StageBase,
 MeasurementInstrumentBase).
 
 Do NOT import from Station, Orchestrator, or Procedure here.
@@ -1467,6 +1467,26 @@ class TemperatureControllerBase(BaseVirtualInstrument):
     setpoint_label: str = "temperature"
     setpoint_unit: str = "K"
     display_label: str = "temperature"
+
+
+class StageBase(BaseVirtualInstrument):
+    """Base class for all sample-positioning (stage) VIs.
+
+    One VI positions ONE axis: the setpoint a stage VI ramps is a single
+    position in metres, so a two-axis stage is two VIs of this category over
+    one driver (``axis`` names which), exactly as a vector magnet is one
+    magnet VI per coil. That is what keeps a stage inside the same scalar
+    setpoint, ``Target`` and envelope standards every other rampable VI
+    obeys — ``Station.stage_vi_names()`` is the role accessor procedures
+    discover them by.
+    """
+    vi_type: str = "stage"
+    setpoint_label: str = "position"
+    setpoint_unit: str = "m"
+    display_label: str = "stage"
+    #: Which axis this VI positions (``"x"``, ``"y"``, …); a concrete VI
+    #: sets it from its config so a procedure can tell the axes apart.
+    axis: str = ""
 
 
 class MeasurementInstrumentBase(BaseVirtualInstrument):

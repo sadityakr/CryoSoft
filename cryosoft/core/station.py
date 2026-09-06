@@ -57,6 +57,7 @@ from cryosoft.core.plan import (
 from cryosoft.virtual_instruments.base import (
     BaseVirtualInstrument,
     MagnetBase,
+    StageBase,
     TemperatureControllerBase,
 )
 from cryosoft.virtual_instruments.rampable import RampableVI
@@ -402,6 +403,18 @@ class Station:
             ``TemperatureControllerBase`` — in config order.
         """
         return self.vi_names_by_base(TemperatureControllerBase)
+
+    def stage_vi_names(self) -> list[str]:
+        """Return the names of all registered stage (sample-positioning) VIs.
+
+        Args:
+            None.
+
+        Returns:
+            List of stage VI names — every VI built on ``StageBase``, one per
+            positioned axis — in config order.
+        """
+        return self.vi_names_by_base(StageBase)
 
     def has_vi(self, vi_name: str) -> bool:
         """Return True if a VI with this name is registered."""
