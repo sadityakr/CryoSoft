@@ -2847,27 +2847,16 @@ _SAFETY_DEFAULTS: dict[str, float] = {
 # that distinction legible in devices.yaml, at the cost of one more block
 # name to remember.
 #
-# The per-check keys below (sample_temperature_*, store_live_stale_ticks)
-# are mirrored, not imported, in
-# cryosoft.core.trend_checks's own `.get()` fallbacks (import-linter
-# contract C15 keeps that module Station-free) — a real setup's config
-# always arrives there already merged through read_trends_config(), so the
-# mirror only matters for a caller that evaluates declared_checks() against
-# a partial dict directly (this module's own tests).
-#
-# Defaults are deliberately loose rather than tuned to any one setup's
-# noise floor: sample_temperature_std_limit_K/range_limit_K are set well
-# above what a controller with zero sensor noise reports (the sim drivers
-# model no temperature noise at all, so a stable simulated run reports
-# std ~ 0). An unvalidated threshold that fires constantly is worse than no
-# check at all, so every default here is expected to be re-tuned per real
-# setup once real noise data exists.
-_TREND_DEFAULTS: dict[str, float] = {
+# The checks themselves are the `checks:` list — one entry per declared
+# check, built by cryosoft.core.trend_checks.declared_checks() — and default
+# to none: a setup that declares no check runs no check. Which channel is
+# watched and what band it must stay in are setup facts (a controller's
+# noise floor, a sample's safe range), so no default check ships here; the
+# example config declares one.
+_TREND_DEFAULTS: dict[str, Any] = {
     "refresh_interval_s": 60.0,
-    "sample_temperature_window_s": 3600.0,
-    "sample_temperature_std_limit_K": 0.1,
-    "sample_temperature_range_limit_K": 0.5,
     "store_live_stale_ticks": 10.0,
+    "checks": [],
 }
 
 
@@ -3165,31 +3154,43 @@ def read_safety_config(config_path: str) -> dict[str, float]:
     return merged
 
 
-def read_trends_config(config_path: str) -> dict[str, float]:
+def read_trends_config(config_path: str) -> dict[str, Any]:
     """Read the optional ``trends:`` block, GUI-safe, always defaulted.
 
     Mirrors ``read_safety_config()``'s pattern exactly: the trend-check
     scheduler (`cryosoft.core.trend_check_runner.TrendCheckRunner`) always
     needs a refresh cadence, so an absent block means "use the defaults",
-    never "feature disabled". See ``_TREND_DEFAULTS``'s comment for why this is its own block rather than
-    an extension of ``safety:``. No shipped ``devices.yaml`` declares a
-    ``trends:`` block today — this is the code-default pattern, the same
-    precedent ``stall_seconds`` established for ``safety:``.
+    never "feature disabled". See ``_TREND_DEFAULTS``'s comment for why
+    this is its own block rather than an extension of ``safety:``.
 
     Expected shape::
 
         trends:
           refresh_interval_s: 60.0
+          store_live_stale_ticks: 10
+          checks:                      # the Trend check standard's declarations
+            - key: temperature_temperature
+              low: 1.0
+              high: 320.0
+              window_s: 3600.0
+
+    Each ``checks:`` entry is handed as-is to
+    ``cryosoft.core.trend_checks.declared_checks()``, which builds and
+    validates the check (an unknown field or a band with ``low >= high`` is
+    a config error raised THERE, where the check kinds are known).
 
     Args:
         config_path: Path to the config directory containing ``devices.yaml``.
 
     Returns:
-        ``_TREND_DEFAULTS`` with any declared overrides merged in. Falls
-        back to the defaults untouched if the config directory/file/YAML is
-        unreadable or the block is absent/malformed — never raises.
+        ``_TREND_DEFAULTS`` with any declared overrides merged in;
+        ``"checks"`` is always a list (``[]`` when absent). Falls back to
+        the defaults untouched if the config directory/file/YAML is
+        unreadable or the block is absent/malformed, and to ``[]`` when
+        ``checks:`` is not a list — never raises.
     """
-    merged = dict(_TREND_DEFAULTS)
+    merged: dict[str, Any] = dict(_TREND_DEFAULTS)
+    merged["checks"] = []
     devices_config = _load_devices_yaml(config_path)
     if devices_config is None:
         return merged
@@ -3197,4 +3198,10 @@ def read_trends_config(config_path: str) -> dict[str, float]:
     if not isinstance(block, dict):
         return merged
     merged.update(block)
+    if not isinstance(merged["checks"], list):
+        logger.warning(
+            "trends.checks in %s must be a list, got %r — running no trend checks",
+            config_path, merged["checks"],
+        )
+        merged["checks"] = []
     return merged

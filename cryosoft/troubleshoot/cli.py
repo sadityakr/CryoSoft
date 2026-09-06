@@ -759,8 +759,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=_cmd_session)
 
     p = sub.add_parser("trends", parents=[common],
-                       help="evaluate the declared trend checks (temperature stability) "
-                            "plus the pull-only store-liveness check")
+                       help="evaluate the trend checks this setup's devices.yaml "
+                            "declares under trends.checks (each a channel kept within "
+                            "a band over a window) plus the pull-only store-liveness "
+                            "check")
     _add_config_arg(p)
     p.add_argument(
         "--window",

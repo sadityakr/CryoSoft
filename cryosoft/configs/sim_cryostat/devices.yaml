@@ -63,3 +63,18 @@ virtual_instruments:
       role: DC source-and-measure (source + nanovoltmeter pair)
       manufacturer: Keithley
       model: 6221 + 2182A
+
+# Trend checks (the Trend check standard, core/trend_checks.py): advisory
+# judgements over the trend-history store, evaluated on their own slow timer
+# and published as advisory conditions — they report, never enforce. Each
+# entry watches one flat state key ("<vi_name>_<monitored_method>") and
+# fails when the window's min/max leave the band. The band here is this
+# setup's controller range; a real setup narrows it to the sample's own.
+trends:
+  refresh_interval_s: 60.0
+  store_live_stale_ticks: 10
+  checks:
+    - key: temperature_temperature
+      low: 1.0
+      high: 320.0
+      window_s: 3600.0

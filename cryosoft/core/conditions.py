@@ -65,7 +65,7 @@ class Condition:
     Attributes:
         key: Stable identity for this condition, e.g. ``"comm:magnet_z"``,
             ``"safety:coolant_low"``, ``"envelope:<bound-description>"``,
-            ``"trend:sample_temperature_stable"``. Non-empty; used to sort
+            ``"trend:temperature_temperature_within_band"``. Non-empty; used to sort
             and to deduplicate.
         origin: One of `ORIGINS` — which producer reported this.
         severity: One of `SEVERITIES` — determines enforcement scope.
