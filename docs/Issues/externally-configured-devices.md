@@ -1,1 +1,0 @@
-Currently configured in config file. Not ideal. Should be turned on or off in GUI or some station variables.
