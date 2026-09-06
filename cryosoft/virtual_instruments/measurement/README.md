@@ -138,9 +138,10 @@ entirely at the procedure/schema layer (`SweepMeasureProcedure.measure()`
 squeezes the trivial axis away before saving) — a VI's own `take_reading()`
 always returns the block as a flat `rows x channels` list regardless of any
 loop. The shape the mechanism is built for is an instrument whose every
-reading is a wide record — a many-column diagnostic dump, or a camera frame
-whose rows and columns are pixels — where the block IS the datum and the
-scalar columns are derived from it.
+reading is a wide record of NAMED channels — a many-column diagnostic dump
+— where the block IS the datum and the scalar columns are derived from it.
+A frame, whose rows and columns are pixels rather than channels, is the
+image block's job (next section).
 
 The declared `measurement_raw_blocks` label list is not just an in-memory
 contract — `DataManager` writes it to disk as the block dataset's own

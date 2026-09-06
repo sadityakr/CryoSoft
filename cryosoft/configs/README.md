@@ -179,6 +179,9 @@ sibling directory with the same two files (plus its `setup.md`).
   - `devices.yaml` — all `Sim*` drivers at `SIM::*` addresses; the canonical VI
     graph and `init_params`.
   - `monitor.yaml` — `tick_interval_ms: 3000`, `max_vi_errors: 3`.
+  - `setup.md` — the per-setup ground truth (GLOSSARY.md's **setup.md**), in
+    the `setup-commission` skill's template; the shipped one doubles as the
+    example a real setup starts from.
 - `sim_imaging/` — fully simulated widefield-imaging station, the second
   worked example: `magnet_z` (`SuperconductingMagnetVI` on `SimOxfordIPS120`),
   `stage_x` and `stage_y` (one `StageAxisVI` per axis, both on one
@@ -190,6 +193,8 @@ sibling directory with the same two files (plus its `setup.md`).
   `drivers/README.md`); the stage joins no environment.
   - `devices.yaml` — the VI graph above and its `init_params`.
   - `monitor.yaml` — `tick_interval_ms: 3000`, `max_vi_errors: 3`.
+  - `setup.md` — as above, for the imaging station: the `@imaging` coupling
+    is the one wiring fact it records.
 
 **A real setup and its sim twin.** The intended shape for a real cryostat is a
 pair of config directories: one naming the real `cryosoft.drivers.*` classes at

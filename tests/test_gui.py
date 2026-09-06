@@ -2672,6 +2672,56 @@ def test_measurement_ready_updates_plot(procedure_win, orchestrator):
     assert abs(procedure_win._datapoints[0]["field_T"] - 0.5) < 1e-9
 
 
+def test_procedure_window_on_the_imaging_station_ignores_the_image_column(qtbot):
+    """Field Imaging on sim_imaging: the frame is never a plot axis, a datapoint
+    carrying one is handled, and the form renders the stage roles.
+
+    The image-block standard says the live plot ignores image columns and
+    plots the VI's scalars; this pins that for the shipped camera VI.
+    """
+    host = build_host("cryosoft/configs/sim_imaging")
+    try:
+        station = host.station
+        orchestrator = host.build_proxy()
+        win = ProcedureWindow(
+            station,
+            orchestrator,
+            get_sample_info=lambda: {"sample_name": "D", "sample_id": "1", "comments": ""},
+            get_data_dir=lambda: "C:/CryoData",
+        )
+        qtbot.addWidget(win)
+        win.show()
+        win._params_panel.select_procedure_by_name("Field Imaging")
+
+        y_keys = [win._plot1._y_selector.itemText(i) for i in range(win._plot1._y_selector.count())]
+        assert "roi_mean" in y_keys and "roi_std" in y_keys
+        assert "frame" not in y_keys, "an image block is never a plot axis"
+        assert "roi_mean_array" not in y_keys
+
+        assert win._params_panel.current_class().name == "Field Imaging"
+        assert win._params_panel.current_selections().get("measurement_vi") == "camera"
+        values = win._params_panel.collect_values()
+        assert values is not None
+        assert values["stage_x_vi"] == "stage_x" and values["stage_y_vi"] == "stage_y"
+        assert values["saturation_field_T"] == -1.5
+
+        import numpy as np
+
+        datapoint = {
+            "field_T": 0.5,
+            "frame": np.zeros((128, 128)),
+            "roi_mean": 2580.0,
+            "roi_mean_error": 0.0,
+            "roi_std": 30.0,
+            "roi_mean_array": [2580.0],
+        }
+        orchestrator.measurement_ready.emit(datapoint)
+        assert len(win._datapoints) == 1
+        assert win._datapoints[0]["roi_mean"] == 2580.0
+    finally:
+        shutdown_host(host)
+
+
 # ── Fixed 2x2 quadrant layout tests (GUI optimization redesign) ─────────────
 
 def test_monitor_quadrant_splitters_not_collapsible(monitor_win):
