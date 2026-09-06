@@ -3,6 +3,7 @@
 import logging
 import time
 
+from cryosoft.core import sim_environment
 from cryosoft.core.exceptions import (
     CryoSoftCommunicationError,
     CryoSoftInstrumentError,
@@ -21,6 +22,13 @@ class SimOxfordIPS120:
     Persistent mode is heater-derived (heater OFF = persistent), mirroring
     the real Mercury iPS driver; ``set_persistent_mode()`` is a no-op.
 
+    The sim-coupling standard (``drivers/README.md``): the PSU publishes its
+    present output current to the ``SimEnvironment`` its resource string
+    names (``"SIM::IPS_Z@imaging"`` joins ``imaging``; no suffix means a
+    private world), so a sim that responds to the applied field — the sim
+    camera — observes this magnet without either importing the other. The
+    PSU knows only its current; the environment holds the coil constant.
+
     This driver satisfies the three-rule driver contract:
     1. It is a Python class.
     2. __init__ accepts a single VISA resource string (ignored for simulation).
@@ -35,9 +43,12 @@ class SimOxfordIPS120:
         """Initialise the simulated IPS 120.
 
         Args:
-            resource_string: VISA address (e.g. 'GPIB0::25::INSTR'). Ignored.
+            resource_string: VISA address (e.g. 'GPIB0::25::INSTR'). Only its
+                optional ``@<environment>`` suffix is read (the sim-coupling
+                standard); the address itself is ignored.
         """
-        _ = resource_string  # Explicitly ignored per driver contract
+        # The shared sim world this PSU publishes its current into.
+        self._environment = sim_environment.for_resource(resource_string)
 
         self._current: float = 0.0       # Current output in Amperes
         self._setpoint: float = 0.0      # Target current in Amperes
@@ -60,6 +71,9 @@ class SimOxfordIPS120:
         self._closed: bool = False
         self._simulate_quench: bool = False  # Forces status to "QUENCH"
         self._simulate_clamp: bool = False   # Forces a hardware CLMP ("red Clamped") condition
+        # A fresh PSU sits at zero: say so, so a world shared with an earlier
+        # instance never carries that instance's last current forward.
+        self._publish_current()
 
     # ------------------------------------------------------------------
     # Public API
@@ -273,6 +287,11 @@ class SimOxfordIPS120:
         self._coil_current = 0.0
         self._setpoint = 0.0
         self._switch_heater_on = False
+        self._publish_current()
+
+    def _publish_current(self) -> None:
+        """Publish the present output current to the shared sim environment."""
+        self._environment.psu_current_A = self._current
 
     def _update_simulation(self) -> None:
         """Advance simulated current toward setpoint based on elapsed real time."""
@@ -291,6 +310,7 @@ class SimOxfordIPS120:
         else:
             direction = 1 if remaining > 0 else -1
             self._current += direction * max_step
+        self._publish_current()
 
     # ------------------------------------------------------------------
     # Safe state (the safe-shutdown standard)

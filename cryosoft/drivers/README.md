@@ -12,8 +12,10 @@ directly.
 
 ## Architecture layer
 L0 — Drivers. The lowest layer; depends only on `cryosoft.core.exceptions`
-(and `pyvisa` for the real drivers). Sim drivers have no third-party
-dependency.
+(and `pyvisa` for the real drivers), plus `cryosoft.core.sim_environment`
+for the coupled sims (the **sim-coupling standard** below). Sim drivers
+have no third-party dependency beyond numpy, which the camera sim uses for
+its frames.
 
 ## Entry (what comes in)
 `__init__` takes a single VISA resource string and nothing else (e.g.
@@ -63,7 +65,8 @@ Enforced mechanically by `tests/test_conformance.py`:
   APIs** (`test_sim_real_driver_api_parity`). This parity test pairs twins by
   the `sim_<name>` filename only, so a sim with no real twin of the same name
   (`sim_keithley_6221`, `sim_oxford_ips120`) is simply not
-  auto-paired; its own L0 tests are what hold its API in place.
+  auto-paired (`sim_camera`, `sim_xy_stage` likewise); its own L0 tests
+  are what hold its API in place.
 
 ## The driver error-reporting standard
 
@@ -115,6 +118,8 @@ charged to the next, innocent command.
 | `sim_keithley_6221.py` | Error queue (`:SYST:ERR?`) after output/current/compliance/range writes, after the delta programming sequence, and after both `:SOUR:DELT:ARM` and `:INIT:IMM` | the SCPI code, e.g. `-221` |
 | `keithley_2182a.py` | Error queue (`:SYST:ERR?`) after the range and continuous-initiation writes | the SCPI code, e.g. `-222` |
 | `lakeshore_335.py` | Status byte (`*ESR?`) after every setter | `ESR:0x<bits>` |
+| `sim_camera.py` (sim-only) | Explicit range check, as a camera SDK reports it, on exposure, binning and ROI writes and on a frame requested while disarmed | `EXPOSURE_RANGE`, `BINNING_UNSUPPORTED`, `ROI_RANGE`, `NOT_ARMED` |
+| `sim_xy_stage.py` (sim-only) | Explicit range check, as a stage controller reports it, on a move beyond the travel (nothing moves) and a speed outside the controller's range | `TRAVEL_LIMIT`, `SPEED_RANGE` |
 
 **Sim twins model the refusal, not just the physics.** Each sim raises the
 same typed error with the same code its real twin would raise after reading
@@ -162,6 +167,51 @@ Four rules:
 | Lakeshore 335 | Heater range `OFF`, manual output 0 % | the setpoint (heats nothing with the range off) |
 | Oxford IPS 120 (sim-only) | `HOLD` — the magnet stays at field | the field: a fast dump is how magnets quench |
 | Oxford ILM 200 | Pulsed refresh rate, front panel handed back | the level reading itself, which is a safety input and must keep arriving |
+| Sim camera (sim-only) | Sensor disarmed — no exposure can be triggered | exposure, binning and ROI: settings, not hazards |
+| Sim XY stage (sim-only) | Both axes stopped where they are | the position: a drive home is a move like any other and can collide with whatever is in the way |
+
+## The sim-coupling standard
+
+**A sim models one instrument. Two sims that share a physical quantity
+exchange it through a `SimEnvironment` and never import each other.** The
+simulated magnet applies a field; the simulated camera images a sample
+that responds to it. Neither knows the other exists: the PSU publishes the
+one thing a PSU knows — its output current — into the environment its
+resource string names, the environment holds the physics that relates the
+two (the coil constant `amperes_per_tesla`, the same number the shipped
+configs give the magnet VI), and the camera reads the field at the sample
+from that same environment when it takes a frame. `SimKeithley6221`'s
+`_paired_meter` is the older, narrower form of the same idea — two halves
+of one delta measurement wired together by a test — and stays as it is;
+the environment is the form to use whenever the coupling is a physical
+quantity rather than a cable.
+
+Three rules:
+
+- **Opt in through the resource string.** A sim joins the environment its
+  resource string's `@<name>` suffix names (`"SIM::IPS_Z@imaging"` and
+  `"SIM::CAMERA@imaging"` share `imaging`); a string without a suffix gets
+  a private world, so two sims built independently in a test stay
+  independent unless the test says otherwise. The resource string is the
+  one argument every driver takes, so the coupling needs no second
+  constructor argument and no config key: the config's `address` is the
+  whole declaration.
+- **Producers publish, consumers read, the environment knows the
+  physics.** A producer publishes whenever the quantity changes and once at
+  construction (a fresh PSU sits at zero, and a world shared with an
+  earlier instance must not carry that instance's last value forward). A
+  consumer reads at the moment it observes (the camera when it exposes a
+  frame). The conversion between what is published and what is observed is
+  the environment's, never either sim's, so it is written down once.
+- **Tests drive the world directly.** `SimEnvironment.applied_field_T` is
+  settable, so an L0 test sweeps the field without building a magnet, and
+  the L0 suite pins the environment's coil constant to every shipped
+  config's `amperes_per_tesla`.
+
+The registry lives in `cryosoft/core/sim_environment.py` rather than here
+because every module in this folder is checked as a driver (one class, one
+resource argument, `get_idn`/`close`/`safe_shutdown`), and an environment
+is not an instrument.
 
 ## How to add a new module
 1. Write the real driver: one public class, `__init__(self, resource: str)`,
@@ -213,6 +263,24 @@ Real / sim twins are grouped; each `.py` lists its key methods and owning tests.
 - `sim_oxford_ips120.py` — `SimOxfordIPS120`: API-compatible sim of the IPS 120-10
   magnet PSU; models ramping, heater-derived persistent mode, coil-current
   freeze, and a QUENCH when the heater energises across a PSU/coil current
-  mismatch; `reset_quench` test hook. Sim-only. tests:
-  `tests/test_l0_simulated.py`, `tests/test_l0_driver_errors.py`.
+  mismatch; `reset_quench` test hook; publishes its output current to
+  its `SimEnvironment` (the sim-coupling standard). Sim-only. tests:
+  `tests/test_l0_simulated.py`, `tests/test_l0_driver_errors.py`,
+  `tests/test_l0_sim_camera_stage.py`.
+- `sim_camera.py` — `SimCamera`: sim widefield camera imaging a magnetic
+  domain pattern; `set_exposure_s`/`set_binning`/`set_roi` and their reads,
+  `arm`/`disarm`/`is_armed`, `get_frame() -> uint16 (height, width)`,
+  `get_sensor_size`. Frame physics: per-pixel switching fields (coercive
+  field plus spatially correlated disorder from a fixed seed) so domains
+  nucleate and grow with the applied field and remember their state — a
+  field sweep gives a hysteresis loop of mean intensity; Gaussian
+  illumination, exposure scaling, Poisson shot noise, full-well
+  saturation. Reads the field from its `SimEnvironment` (the sim-coupling
+  standard). Sim-only. tests: `tests/test_l0_sim_camera_stage.py`.
+- `sim_xy_stage.py` — `SimXYStage`: sim two-axis sample stage; per-axis
+  `move_to(x_m=None, y_m=None)` (an omitted axis keeps its own move),
+  `get_position`/`get_target`, `set_speed`/`get_speed`, `is_moving(axis)`,
+  `stop(axis)`; wall-clock motion at the set speed, travel-limit and
+  speed-range refusals. Sim-only. tests:
+  `tests/test_l0_sim_camera_stage.py`.
 - `__init__.py` — package marker (docstring only). tests: none.
