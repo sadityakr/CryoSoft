@@ -253,13 +253,35 @@ Each row: responsibility, key public class, and the test file(s) in `tests/`.
 | File | Responsibility | Key public API | Tests |
 |------|----------------|----------------|-------|
 | `__init__.py` | Package marker | (none) | none |
+| `field_imaging.py` | Sweeps magnetic field on the discovered magnet (`field_vi`, required) from a **saturated start** — the saturation pre-step below — positioning the discovered stage axes (`stage_x_vi` / `stage_y_vi`, optional, told apart by each VI's `axis`) to `stage_x_m` / `stage_y_m`, and running any selected measurement VI at each point; hands the magnet to its own `standby()` on standby and leaves the stage where it is. Built for the camera (a frame per point), runs any measurement method. | `FieldImaging` (axis hooks + `initiation_gates` over `SweepMeasureProcedure`) | `test_field_imaging_procedure.py` |
 | `field_sweep.py` | Sweeps magnetic field on the discovered magnet (`field_vi`, required), optionally setting the discovered temperature controller (`temperature_vi`, optional; gated by `set_temperature`), running any selected measurement VI at each point; hands the magnet to its own `standby()` on standby. Requires a magnet and at least one measurement VI. | `FieldSweep` (axis hooks over `SweepMeasureProcedure`) | `test_new_procedures.py`, `test_l4_procedure.py` |
 | `time_series.py` | Measures repeatedly against elapsed time, commanding no system hardware and claiming only the reading path, so the operator keeps manual control of the whole cryostat during the run. Ends on `max_duration_s`, or when a watched channel (any magnet or temperature controller the setup configures, discovered at construction) reaches `end_value`. Requires at least one measurement VI; a watched channel's VI must exist. | `TimeSeries` (axis hooks + `axis_data_key`/`claimed_vi_names`/`get_param_groups` over `SweepMeasureProcedure`) | `test_time_series_procedure.py`, `test_l3_orchestrator.py` (ramp scope) |
 | `temperature_sweep.py` | Sweeps temperature on the discovered controller (`temperature_vi`, required) at a per-sweep ramp rate, optionally holding the discovered magnet (`field_vi`, optional) at `field`, running any selected measurement VI at each stable point. Requires a temperature controller and at least one measurement VI; a magnet is optional (a nonzero `field` with no magnet is refused at construction). | `TemperatureSweep` (axis hooks over `SweepMeasureProcedure`) | `test_new_procedures.py` |
 
+### The saturation pre-step (Field Imaging)
+
+`FieldImaging` differs from `FieldSweep` in its magnetic history, which is
+what makes the first frame a **reference frame** (GLOSSARY.md): with
+`saturate` on, `initiate()`'s field target is `saturation_field_T` (signed,
+default -1.5 T — normally beyond the sweep's start on the same side), and
+the procedure's `initiation_gates()` then take over from `wait_s`: the
+first gate's one-shot action dispatches the magnet's own `set_field` to the
+first sweep field as a `Command` through the Station and holds until the
+magnet reports `TARGET_REACHED` (the Orchestrator advances ramps while a
+gate waits), and a second gate is the `init_wait` settle. The first
+`measure()` therefore images the sample at the first sweep point after
+arriving from saturation — a fully magnetised, known state — and every
+later frame is compared against it. `saturate` off means no gates and the
+run starts at the first sweep point like a plain field sweep. The stage
+targets ride in the same `initiate()` plan as ordinary `Target`s, one per
+axis VI (`virtual_instruments/stage/README.md`), so a setup without a stage
+simply emits none.
+
 ### The temperature toggle (on/off)
 
-Both sweep procedures gate their temperature target on one bool parameter:
+Both temperature-aware sweep procedures gate their temperature target on
+one bool parameter (`FieldImaging` sets no temperature — the imaging setup
+has no controller — and would declare the same toggle if it did):
 
 | Parameter | Default | Effect when on |
 |---|---|---|
