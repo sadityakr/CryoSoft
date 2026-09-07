@@ -60,6 +60,26 @@ DEFAULT_TIMEOUT_S = 120.0
 #: How much is read from the socket at once.
 _CHUNK = 65536
 
+if os.name == "nt":  # pragma: no cover — exercised only on Windows
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    #: ``PeekNamedPipe`` reports how many bytes a pipe has ready without
+    #: consuming them, which is the one thing a selector would have given us
+    #: here and cannot. Declared with its signature so ctypes converts the
+    #: handle rather than truncating it to an int on 64-bit.
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _kernel32.PeekNamedPipe.argtypes = [
+        wintypes.HANDLE,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+        ctypes.POINTER(wintypes.DWORD),
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    _kernel32.PeekNamedPipe.restype = wintypes.BOOL
+
 
 class GatewayError(RuntimeError):
     """The gateway refused a request, or the connection failed.
@@ -224,10 +244,19 @@ class _PipeTransport:
     """A named pipe to a listening ``QLocalServer`` on Windows.
 
     A local socket is a named pipe there, not a file in the filesystem, so
-    it is opened rather than connected to and cannot be polled by a
-    selector. The consequence is one the adapter handles rather than hides:
-    ``fileno()`` returns ``None``, so notifications are delivered on the
-    next request instead of the moment they arrive.
+    it is opened rather than connected to, and no selector will wait on it:
+    ``fileno()`` returns ``None`` and always will.
+
+    **A pipe cannot be selected on, but it can be asked what it is holding.**
+    ``PeekNamedPipe`` reports the bytes already delivered without consuming
+    them, so a non-blocking ``recv()`` reads exactly what is there and
+    otherwise returns empty-handed — the same three answers
+    ``_UnixTransport`` gives. That is what lets an event the app emitted
+    between two requests reach the session on the serving loop's next look
+    rather than sitting in the pipe until something else is asked. The
+    blocking read is unchanged, and deliberately: a reader thread parked in a
+    blocking read on this handle deadlocks against the interpreter
+    finalising it at exit, which is a hang in place of a latency.
     """
 
     def __init__(self, name: str, timeout: float) -> None:
@@ -236,7 +265,7 @@ class _PipeTransport:
         Args:
             name: The pipe's name, with or without the ``\\\\.\\pipe\\``
                 prefix.
-            timeout: Unused; a pipe read blocks.
+            timeout: Unused; a blocking pipe read waits as long as it waits.
 
         Raises:
             GatewayError: If the pipe cannot be opened.
@@ -268,24 +297,45 @@ class _PipeTransport:
             raise GatewayError(f"gateway write failed: {error}") from error
 
     def recv(self, *, blocking: bool) -> bytes:
-        """Read one chunk, blocking.
+        """Read what the pipe has, waiting for it only when asked to.
 
         Args:
-            blocking: A non-blocking read is not available on a pipe, so a
-                ``False`` here reads nothing rather than blocking anyway.
+            blocking: Wait for bytes that have not arrived when ``True``;
+                take only what the pipe already holds when ``False``.
 
         Returns:
-            The bytes read, or ``b""``.
+            The bytes read; ``b""`` when nothing waited and *blocking* is
+            ``False``, or when the peer closed.
 
         Raises:
             GatewayError: If the read fails.
         """
         if not blocking:
-            return b""
+            waiting = self._waiting()
+            if waiting <= 0:
+                return b""
         try:
-            return self._handle.read(1)
+            return self._handle.read(1 if blocking else min(waiting, _CHUNK))
         except OSError as error:
             raise GatewayError(f"gateway read failed: {error}") from error
+
+    def _waiting(self) -> int:
+        """Return how many bytes the pipe holds, without consuming them.
+
+        Returns:
+            The byte count, or ``0`` when the pipe cannot be asked — a
+            handle already closed, or a peer that went away. Zero is always
+            safe to answer: it costs a notification its immediacy, never the
+            session, because the next blocking read still finds the bytes.
+        """
+        try:
+            handle = msvcrt.get_osfhandle(self._handle.fileno())
+        except (OSError, ValueError):
+            return 0
+        waiting = wintypes.DWORD(0)
+        if not _kernel32.PeekNamedPipe(handle, None, 0, None, ctypes.byref(waiting), None):
+            return 0
+        return int(waiting.value)
 
     def close(self) -> None:
         """Close the pipe, ignoring one that is already gone."""
