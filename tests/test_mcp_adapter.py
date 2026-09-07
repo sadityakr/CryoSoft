@@ -12,7 +12,9 @@
 from __future__ import annotations
 
 import ast
+import io
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -32,6 +34,7 @@ from cryosoft.mcp.adapter import (
 )
 from cryosoft.mcp.client import GatewayError, read_descriptor
 from cryosoft.mcp.sdk import sdk_unavailable_reason, serve_with_sdk
+from cryosoft.mcp.shim import serve
 from cryosoft.procedures.field_sweep import FieldSweep
 from cryosoft.session.gateway import GatewayServer, Role, ToolContext
 from cryosoft.session.manager import ExperimentManager
@@ -45,6 +48,26 @@ TOKEN = "test-token-not-a-secret"
 SAMPLE_INFO = {"sample_name": "S", "sample_id": "S-1", "comments": ""}
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+#: The variables the adapter subprocess is allowed to inherit. Nothing that
+#: could point it at an application is among them — it must find the app
+#: through the descriptor it is handed and no other way — but an interpreter
+#: still needs a few things from its platform to start at all. On Windows
+#: ``SystemRoot`` is one of them: without it Winsock cannot initialise, and
+#: the process dies importing ``asyncio`` before it has read a byte of stdin.
+_INHERITED_ENV = ("PATH", "SystemRoot", "windir", "COMSPEC", "PATHEXT", "TEMP", "TMP")
+
+
+def _adapter_env() -> dict[str, str]:
+    """Build the environment the adapter subprocess runs in.
+
+    Returns:
+        ``PYTHONPATH`` pointing at this checkout, plus whichever of
+        ``_INHERITED_ENV`` this platform actually set.
+    """
+    env = {name: os.environ[name] for name in _INHERITED_ENV if name in os.environ}
+    env["PYTHONPATH"] = str(REPO_ROOT)
+    return env
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -412,6 +435,50 @@ def test_the_sdk_backend_declines_rather_than_serving_partially():
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# The shim waits on whatever the platform gave it
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_the_shim_serves_over_the_pipe_a_client_actually_hands_it():
+    """stdin is a pipe, not a socket, and the loop has to cope with that.
+
+    The regression this guards: the loop waited on stdin with ``select``,
+    which on Windows takes sockets alone, so every session there died with
+    ``OSError`` the instant serving began — before the handshake was
+    answered, which a client sees only as a closed connection. A real
+    ``os.pipe`` reproduces it on the platform where it happens and costs
+    nothing on the platforms where it does not.
+    """
+    adapter, _ = _adapter()
+    read_fd, write_fd = os.pipe()
+    os.write(write_fd, json.dumps(_request("server/discover")).encode("utf-8") + b"\n")
+    os.close(write_fd)
+    sink = io.BytesIO()
+
+    with open(read_fd, "rb", buffering=0) as source:
+        serve(adapter, stdin=source, stdout=sink)
+
+    answered = [json.loads(line) for line in sink.getvalue().splitlines() if line.strip()]
+    assert [one["id"] for one in answered] == [1]
+    assert answered[0]["result"]["serverInfo"]["name"] == "cryosoft"
+
+
+def test_the_shim_serves_a_stream_that_has_no_descriptor_at_all():
+    """An in-memory stream cannot be selected on either, and still serves."""
+    adapter, _ = _adapter()
+    frames = b"".join(
+        json.dumps(_request("server/discover", request_id=n)).encode("utf-8") + b"\n"
+        for n in (1, 2)
+    )
+    sink = io.BytesIO()
+
+    serve(adapter, stdin=io.BytesIO(frames), stdout=sink)
+
+    answered = [json.loads(line) for line in sink.getvalue().splitlines() if line.strip()]
+    assert [one["id"] for one in answered] == [1, 2]
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # The descriptor
 # ══════════════════════════════════════════════════════════════════════════
 
@@ -479,7 +546,7 @@ class AdapterProcess:
                 "WARNING",
             ],
             cwd=str(REPO_ROOT),
-            env={"PYTHONPATH": str(REPO_ROOT), "PATH": "/usr/bin:/bin"},
+            env=_adapter_env(),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -744,7 +811,7 @@ def test_the_adapter_refuses_to_start_without_a_running_app(tmp_path):
     completed = subprocess.run(  # noqa: S603 — our own interpreter
         [sys.executable, "-m", "cryosoft.mcp", "--descriptor", str(tmp_path / "gone.json")],
         cwd=str(REPO_ROOT),
-        env={"PYTHONPATH": str(REPO_ROOT), "PATH": "/usr/bin:/bin"},
+        env=_adapter_env(),
         capture_output=True,
         timeout=60,
     )
