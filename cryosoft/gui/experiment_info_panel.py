@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 import qtawesome as qta
@@ -31,9 +32,16 @@ from cryosoft.gui.experiment_dialogs import (
 )
 from cryosoft.gui.form_autosave import FormAutosaveState
 from cryosoft.gui.theme import TEXT_PRIMARY
+from cryosoft.session.eln.publisher import (
+    PUBLISH_DISABLED,
+    PUBLISH_OFFLINE,
+    PUBLISH_PENDING,
+    ElnPublisher,
+)
 from cryosoft.session.manager import ExperimentManager
 
 _ELN_NOT_CONFIGURED_TEXT = "eLab publishing is not configured yet"
+_ELN_IDLE_TEXT = "eLab: connected, nothing published yet"
 _OUTSIDE_SESSION_NOTE_TEXT = "saving outside the current session folder"
 
 
@@ -51,15 +59,34 @@ class ExperimentInfoPanel(QWidget):
         session_manager: The L6 ExperimentManager. When ``None`` (unit tests
             that build the panel standalone), the experiment row is shown
             but its button stays disabled.
+        eln_publisher: The application's ``ElnPublisher``, so this row can
+            show live publish state instead of a static message. ``None``
+            (unit tests, or a build with no notebook wired) leaves it on the
+            "not configured" text.
+        open_eln_settings: Opens the **eLab setup dialog** — the Monitor
+            window's own ``_open_eln_settings``, the same one its User menu
+            and the procedure window's eLab tab already use. Passed in
+            rather than built here so there is exactly one dialog wiring to
+            keep in sync with the publisher. ``None`` disables the button.
     """
 
     def __init__(
         self,
         parent: QWidget | None = None,
         session_manager: ExperimentManager | None = None,
+        eln_publisher: ElnPublisher | None = None,
+        open_eln_settings: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(parent)
         self._session_manager = session_manager
+        self._eln_publisher = eln_publisher
+        self._open_eln_settings = open_eln_settings
+        self._eln_link_url = ""
+        self._eln_state: dict = (
+            eln_publisher.status()
+            if eln_publisher is not None
+            else {"state": PUBLISH_DISABLED, "pending": 0, "detail": ""}
+        )
         # Data Dir transition tracking (rule 3): _last_experiment_id
         # detects an actual open/switch transition (vs. a same-experiment
         # experiment_changed re-emit from e.g. an attendance/findings edit);
@@ -93,10 +120,23 @@ class ExperimentInfoPanel(QWidget):
         outer.addWidget(scroll)
 
         outer.addWidget(QLabel("<b>eLab</b>"))
-        self._eln_status_label = QLabel(_ELN_NOT_CONFIGURED_TEXT)
+        self._eln_status_label = QLabel()
         self._eln_status_label.setObjectName("eln_status_label")
         self._eln_status_label.setWordWrap(True)
         outer.addWidget(self._eln_status_label)
+
+        eln_setup_btn = QPushButton("eLab setup…")
+        eln_setup_btn.setObjectName("eln_setup_btn")
+        if self._open_eln_settings is None:
+            eln_setup_btn.setEnabled(False)
+            eln_setup_btn.setToolTip("eLab setup is not available")
+        else:
+            eln_setup_btn.clicked.connect(self._open_eln_settings)
+        outer.addWidget(eln_setup_btn)
+        self._refresh_eln_label()
+
+        if self._eln_publisher is not None:
+            self._eln_publisher.publish_state_changed.connect(self._on_eln_state_changed)
 
         if self._session_manager is not None:
             self._session_manager.experiment_changed.connect(self._on_experiment_changed)
@@ -344,7 +384,8 @@ class ExperimentInfoPanel(QWidget):
             self._start_close_btn.setText("Start Experiment…")
             self._attended_checkbox.setVisible(False)
             self._set_envelope_visible(False)
-            self._eln_status_label.setText(_ELN_NOT_CONFIGURED_TEXT)
+            self._eln_link_url = ""
+            self._refresh_eln_label()
             self._restore_data_dir_on_close()
             return
 
@@ -372,12 +413,49 @@ class ExperimentInfoPanel(QWidget):
         self._attended_checkbox.blockSignals(False)
 
         eln_link = record.get("eln_link") or {}
-        if eln_link.get("url"):
-            self._eln_status_label.setText(f"Published: {eln_link['url']}")
-        else:
-            self._eln_status_label.setText(f"Not published yet — {_ELN_NOT_CONFIGURED_TEXT}")
+        self._eln_link_url = str(eln_link.get("url", ""))
+        self._refresh_eln_label()
 
         self._force_data_dir_on_open(record.get("experiment_id", ""))
+
+    def _on_eln_state_changed(self, state: dict) -> None:
+        """Reflect an ``ElnPublisher.publish_state_changed`` payload in the row.
+
+        Args:
+            state: ``{"state": str, "pending": int, "detail": str}`` — see
+                ``ElnPublisher.status()``.
+        """
+        self._eln_state = state
+        self._refresh_eln_label()
+
+    def _refresh_eln_label(self) -> None:
+        """Recompute the eLab status text from the latest link and publish state.
+
+        A published link for the CURRENT experiment always wins — it is the
+        one fact this row must never contradict. Otherwise the text follows
+        the publisher's own state machine (``disabled`` / ``offline`` /
+        ``pending`` / ``synced``), so the row says what is actually
+        happening instead of a static "not configured" that never changes
+        once the notebook is actually set up (via the "eLab setup…" button
+        here, the Monitor window's User menu, or the procedure window's eLab
+        tab — all three edit the same settings and reload the same
+        publisher).
+        """
+        if self._eln_link_url:
+            self._eln_status_label.setText(f"Published: {self._eln_link_url}")
+            return
+
+        state = self._eln_state.get("state", PUBLISH_DISABLED)
+        pending = self._eln_state.get("pending", 0)
+        if state == PUBLISH_DISABLED:
+            text = _ELN_NOT_CONFIGURED_TEXT
+        elif state == PUBLISH_OFFLINE:
+            text = f"eLab: notebook unreachable — retrying ({pending} queued)"
+        elif state == PUBLISH_PENDING:
+            text = f"eLab: publishing… ({pending} queued)"
+        else:
+            text = _ELN_IDLE_TEXT
+        self._eln_status_label.setText(text)
 
     def _force_data_dir_on_open(self, experiment_id: str) -> None:
         """Force Data Dir to the (newly) active session's own folder.

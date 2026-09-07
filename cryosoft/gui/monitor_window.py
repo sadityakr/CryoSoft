@@ -621,7 +621,11 @@ class MonitorWindow(QMainWindow):
         # ── Fixed 2x2 quadrant grid (Page 1 — Monitor) ───────────────
         top_left = self._build_instruments_quadrant(measurement_vis, switch_vis)
         self._trends = TrendsQuadrant(self._station, parent=self)
-        self._session_info = ExperimentInfoPanel(session_manager=self._session_manager)
+        self._session_info = ExperimentInfoPanel(
+            session_manager=self._session_manager,
+            eln_publisher=self._eln_publisher,
+            open_eln_settings=self._open_eln_settings,
+        )
         bottom_right = self._build_operations_quadrant()
 
         self._left_splitter = QSplitter(Qt.Orientation.Vertical)
