@@ -5,3 +5,5 @@ monitor:
   # setup stays on the caller's thread until its rack has had a day of
   # hardware soak with it on, then this line goes.
   instrument_thread: false
+  gateway_server: true
+  gateway_max_role: session
