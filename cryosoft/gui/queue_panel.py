@@ -560,7 +560,20 @@ class QueuePanel(QGroupBox):
         self._probe_label.setVisible(bool(note))
 
     def _queue_remove(self) -> None:
-        """Remove the selected item from the queue."""
+        """Remove the selected item from the queue.
+
+        A waiting row is removed through the host. A finished (done or failed)
+        row is history this panel alone holds — the engine's queue no longer
+        knows it — so it is simply dropped from the list. A running row stays.
+        """
+        row = self._queue_list.currentRow()
+        if 0 <= row < len(self._queue) and self._queue[row].status in (
+            STATUS_DONE,
+            STATUS_FAILED,
+        ):
+            del self._queue[row]
+            self._refresh_queue_list()
+            return
         entry = self._selected_pending()
         if entry is None:
             return
