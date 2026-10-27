@@ -124,6 +124,14 @@ def _resolve_active_session(store: SessionStore) -> tuple[str, str]:
     bootstrap session is created and activated on the spot, owned by
     whoever is logged in (or ``GUEST_USER_ID`` when nobody is).
 
+    The pointer is machine-wide while sessions are per-user folders, so it
+    is also re-resolved here when it names somebody else's session: the
+    logged-in user's own most recent session is activated instead, and one
+    is created when they own none. Without that, a pointer left on the
+    previous user's session files this user's experiments in that user's
+    folder — the experiment record carries the right owner while the folder
+    does not.
+
     Args:
         store: The ``SessionStore`` rooted at ``measurement_root() / "sessions"``.
 
@@ -131,10 +139,30 @@ def _resolve_active_session(store: SessionStore) -> tuple[str, str]:
         The active session's ``(user_id, session_id)`` — either the pair
         already pointed to, or a freshly created bootstrap session's.
     """
+    user_id = app_settings.current_user_id() or GUEST_USER_ID
     active = store.get_active()
     if active is not None and store.load(*active) is not None:
-        return active
-    user_id = app_settings.current_user_id() or GUEST_USER_ID
+        # The pointer is machine-wide, but sessions are per-user folders: a
+        # pointer left on the PREVIOUS user's session would silently file this
+        # user's experiments in that user's folder, carrying this user's name.
+        # Launching is the one moment that can be fixed without asking, so the
+        # logged-in user's own session wins over a stale pointer. (In a running
+        # app the same rule is applied by MonitorWindow._follow_user_session,
+        # which can ask.)
+        if active[0] == user_id:
+            return active
+        owned = store.list_sessions(user_id)
+        if owned:
+            logger.info(
+                "Active session %s/%s is not %s's; resuming their own %s instead",
+                active[0], active[1], user_id, owned[-1],
+            )
+            store.set_active(user_id, owned[-1])
+            return user_id, owned[-1]
+        logger.info(
+            "Active session %s/%s is not %s's, who owns none; creating one",
+            active[0], active[1], user_id,
+        )
     session = store.create_session(name=user_id, user_id=user_id)
     store.set_active(user_id, session.session_id)
     return user_id, session.session_id

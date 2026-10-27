@@ -162,6 +162,43 @@ def test_keithley_2182a_real_raises_typed_error_from_the_scpi_queue():
     assert excinfo.value.instrument_message == "Parameter data out of range"
 
 
+def test_keithley_2182a_real_does_not_charge_a_stale_queue_to_the_arming_write():
+    """A ``-213`` left by a free-running meter is not blamed on ``:INIT:CONT OFF``.
+
+    The queue is FIFO and ``set_continuous_initiation()`` is the arming
+    path's first command, so without a drain the first poll of a session
+    returns an entry the previous occupant of the bench queued — the live
+    failure of 2026-10-05. ``:INIT:CONT OFF`` cannot itself produce ``-213``.
+    """
+    from cryosoft.drivers.keithley_2182a import Keithley2182A
+
+    driver = _fake_visa_driver(
+        Keithley2182A,
+        [
+            '-213,"Init ignored"',   # stale: queued by READ? while free-running
+            '-213,"Init ignored"',   # ... and the one before that
+            '0,"No error"',          # drained
+            '0,"No error"',          # the check after the write
+        ],
+    )
+    driver.set_continuous_initiation(False)  # must not raise
+    writes = [call.args[0] for call in driver._instr.write.call_args_list]
+    assert writes == [":INIT:CONT OFF"]
+
+
+def test_keithley_2182a_real_still_raises_for_an_error_the_arming_write_caused():
+    """Draining first must not blind the check to a genuine refusal."""
+    from cryosoft.drivers.keithley_2182a import Keithley2182A
+
+    driver = _fake_visa_driver(
+        Keithley2182A, ['0,"No error"', '-113,"Undefined header"']
+    )
+    with pytest.raises(CryoSoftInstrumentError) as excinfo:
+        driver.set_continuous_initiation(False)
+    assert excinfo.value.code == "-113"
+    assert excinfo.value.instrument_message == "Undefined header"
+
+
 def test_sim_keithley_2182a_refuses_a_range_above_the_channel_maximum():
     """The wrong sequence: ask for a range the channel does not have."""
     from cryosoft.drivers.sim_keithley_2182a import SimKeithley2182A

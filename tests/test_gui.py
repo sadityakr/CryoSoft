@@ -1593,6 +1593,34 @@ def session_manager(tmp_path, station, orchestrator):
 
 
 @pytest.fixture
+def session_manager_with_sessions(tmp_path, station, orchestrator):
+    """ExperimentManager wired to a real Session tier — the launch configuration.
+
+    ``main.py`` always builds these two together, with the ``ExperimentStore``
+    rooted inside the active session's own folder; that is what makes the live
+    switch possible, since a manager holding no ``SessionStore`` has no Session
+    tier to move within. Returns ``(manager, session_store)``.
+    """
+    from cryosoft.session.manager import ExperimentManager
+    from cryosoft.session.models import User
+    from cryosoft.session.store import ExperimentStore, SessionStore, UserRoster
+
+    roster = UserRoster(tmp_path / "users.json")
+    roster.add(User(user_id="jdoe", name="J. Doe", email="jdoe@example.org"))
+    session_store = SessionStore(tmp_path / "sessions")
+    boot = session_store.create_session(name="jdoe", user_id="jdoe")
+    session_store.set_active("jdoe", boot.session_id)
+    manager = ExperimentManager(
+        store=ExperimentStore(session_store.session_dir("jdoe", boot.session_id)),
+        roster=roster,
+        orchestrator=orchestrator,
+        config_name="sim_cryostat",
+        session_store=session_store,
+    )
+    return manager, session_store
+
+
+@pytest.fixture
 def monitor_win_session(station, orchestrator, session_manager, qtbot):
     """MonitorWindow wired to a real ExperimentManager."""
     win = MonitorWindow(station, orchestrator, session_manager=session_manager)
@@ -2304,14 +2332,13 @@ def test_open_resume_session_dialog_without_session_store_shows_message(monitor_
     assert shown
 
 
-def test_open_resume_session_dialog_sets_active_and_notes_status(
-    station, orchestrator, session_manager, qtbot, tmp_path, monkeypatch
+def test_open_resume_session_dialog_switches_live_and_notes_status(
+    station, orchestrator, session_manager_with_sessions, qtbot, monkeypatch
 ):
-    """Picking a session persists it via SessionStore.set_active and notes the status bar."""
+    """Picking a session switches to it in this process, not on the next launch."""
     from cryosoft.gui import monitor_window as mw
-    from cryosoft.session.store import SessionStore
 
-    store = SessionStore(tmp_path / "sessions")
+    session_manager, store = session_manager_with_sessions
     created = store.create_session(name="Cooldown 3", user_id="jdoe")
 
     win = MonitorWindow(
@@ -2337,18 +2364,19 @@ def test_open_resume_session_dialog_sets_active_and_notes_status(
     win._open_resume_session_dialog()
 
     assert store.get_active() == ("jdoe", created.session_id)
-    assert "next launch" in win._status_bar.currentMessage()
+    # The live half: the manager now reads and writes the chosen folder.
+    assert session_manager.store.root == store.session_dir("jdoe", created.session_id)
+    assert created.session_id in win._status_bar.currentMessage()
 
 
 def test_open_resume_session_dialog_resolves_logged_out_user_to_guest(
-    station, orchestrator, session_manager, qtbot, tmp_path, monkeypatch
+    station, orchestrator, session_manager_with_sessions, qtbot, monkeypatch
 ):
     """Nobody logged in: the dialog lists/activates sessions under the Guest identity."""
     from cryosoft.gui import monitor_window as mw
     from cryosoft.session.models import GUEST_USER_ID
-    from cryosoft.session.store import SessionStore
 
-    store = SessionStore(tmp_path / "sessions")
+    session_manager, store = session_manager_with_sessions
     created = store.create_session(name="Walk-in Cooldown", user_id=GUEST_USER_ID)
 
     win = MonitorWindow(
@@ -2363,7 +2391,7 @@ def test_open_resume_session_dialog_resolves_logged_out_user_to_guest(
     class _FakeResumeSessionDialog:
         DialogCode = QDialog.DialogCode
 
-        def __init__(self, store, user_id, parent=None):
+        def __init__(self, store, user_id, parent=None, focus_new=False):
             seen_user_ids.append(user_id)
 
         def exec(self):
@@ -3592,14 +3620,14 @@ def test_monitor_saves_session_on_close(monitor_win, tmp_path):
 
 
 def test_new_session_clears_fields(monitor_win, monkeypatch):
-    """New Session (confirmed) resets the Sample Info fields to defaults."""
+    """Clear Form (confirmed) resets the Sample Info fields to defaults."""
     from cryosoft.core.paths import measurement_root
 
     monitor_win._session_info._sample_name_input.setText("ToClear")
     monkeypatch.setattr(
         QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes
     )
-    monitor_win._on_new_session()
+    monitor_win._on_clear_form()
     assert monitor_win._session_info._sample_name_input.text() == ""
     assert monitor_win._session_info._data_dir_input.text() == str(measurement_root())
 
@@ -4531,6 +4559,283 @@ def test_repeated_card_swaps_retire_every_replaced_card(qtbot):
         assert all(sip.isdeleted(card) for card in retired)
     finally:
         orch.shutdown()
+
+
+# ── Session tier: choosing the folder, and the login following the user ───────
+
+
+def test_new_session_folder_mirrors_the_name_until_it_is_edited(qtbot, tmp_path):
+    """The folder is suggested from the name, then left alone once chosen."""
+    from cryosoft.gui.session_dialogs import ResumeSessionDialog
+    from cryosoft.session.store import SessionStore
+
+    store = SessionStore(tmp_path / "sessions")
+    dialog = ResumeSessionDialog(store, "jdoe")
+    qtbot.addWidget(dialog)
+
+    dialog._new_name_input.setText("R vs T")
+    suggested = dialog._new_dirname_input.text()
+    assert suggested.endswith("r_vs_t")
+
+    # An operator edit pins the folder; typing more of the name must not
+    # silently overwrite what they chose.
+    dialog._new_dirname_input.setText("rvst_project")
+    dialog._on_dirname_edited("rvst_project")
+    dialog._new_name_input.setText("R vs T, batch 2")
+    assert dialog._new_dirname_input.text() == "rvst_project"
+
+
+def test_new_session_shows_the_folder_it_would_occupy(qtbot, tmp_path):
+    """The operator sees the full path before creating anything."""
+    from cryosoft.gui.session_dialogs import ResumeSessionDialog
+    from cryosoft.session.store import SessionStore
+
+    store = SessionStore(tmp_path / "sessions")
+    dialog = ResumeSessionDialog(store, "jdoe")
+    qtbot.addWidget(dialog)
+
+    dialog._new_dirname_input.setText("rvst_project")
+    assert dialog._path_label.text() == str(
+        store.session_dir("jdoe", "rvst_project")
+    )
+
+
+def test_new_session_refuses_a_colliding_folder_inline(qtbot, tmp_path):
+    """A folder name the store would refuse disables Create and says why."""
+    from cryosoft.gui.session_dialogs import ResumeSessionDialog
+    from cryosoft.session.store import SessionStore
+
+    store = SessionStore(tmp_path / "sessions")
+    store.create_session(name="Earlier", user_id="jdoe", session_dirname="rvst")
+    dialog = ResumeSessionDialog(store, "jdoe")
+    qtbot.addWidget(dialog)
+
+    dialog._new_name_input.setText("Another go")
+    dialog._new_dirname_input.setText("rvst")
+
+    assert not dialog._create_btn.isEnabled()
+    # isHidden(), not isVisible(): the dialog itself is never shown here, and
+    # a child of an unshown parent is never "visible" however it was toggled.
+    assert not dialog._error_label.isHidden()
+    assert "already exists" in dialog._error_label.text()
+
+
+def test_new_session_is_created_in_the_chosen_folder(qtbot, tmp_path):
+    """The folder the operator typed is the folder the session gets."""
+    from cryosoft.gui.session_dialogs import ResumeSessionDialog
+    from cryosoft.session.store import SessionStore
+
+    store = SessionStore(tmp_path / "sessions")
+    dialog = ResumeSessionDialog(store, "jdoe")
+    qtbot.addWidget(dialog)
+
+    dialog._new_name_input.setText("R vs T")
+    dialog._new_dirname_input.setText("rvst_project")
+    dialog._on_dirname_edited("rvst_project")
+    dialog._create_btn.click()
+
+    assert store.list_sessions("jdoe") == ["rvst_project"]
+    assert dialog.selected_session_id() == "rvst_project"
+
+
+def test_logging_in_moves_the_active_session_to_that_users_own(
+    station, orchestrator, session_manager_with_sessions, qtbot
+):
+    """The reported bug, at the GUI level: a login must not keep the old folder."""
+    session_manager, store = session_manager_with_sessions
+    mine = store.create_session(name="akashdeep", user_id="akashdeep")
+    session_manager.roster.add(_roster_user("akashdeep"))
+
+    win = MonitorWindow(
+        station, orchestrator, session_manager=session_manager, session_store=store
+    )
+    qtbot.addWidget(win)
+    win.show()
+    assert store.get_active()[0] == "jdoe"
+
+    win._switch_user("akashdeep")
+
+    assert store.get_active() == ("akashdeep", mine.session_id)
+    assert session_manager.store.root == store.session_dir(
+        "akashdeep", mine.session_id
+    )
+
+
+def test_logging_in_leaves_your_own_active_session_alone(
+    station, orchestrator, session_manager_with_sessions, qtbot
+):
+    """Owning several sessions must not bounce you off the one you are in."""
+    session_manager, store = session_manager_with_sessions
+    already = store.get_active()
+    store.create_session(name="Another of mine", user_id="jdoe", session_dirname="other")
+
+    win = MonitorWindow(
+        station, orchestrator, session_manager=session_manager, session_store=store
+    )
+    qtbot.addWidget(win)
+    win.show()
+    win._switch_user("jdoe")
+
+    assert store.get_active() == already
+
+
+def test_switching_session_is_refused_while_an_experiment_is_open(
+    station, orchestrator, session_manager_with_sessions, qtbot, monkeypatch
+):
+    """The open record belongs to the folder it was written in."""
+    session_manager, store = session_manager_with_sessions
+    target = store.create_session(name="Target", user_id="jdoe", session_dirname="target")
+    was = session_manager.store.root
+    session_manager.start_experiment(
+        title="In progress", user_id="jdoe", sample_info={"sample_name": "A"}
+    )
+
+    win = MonitorWindow(
+        station, orchestrator, session_manager=session_manager, session_store=store
+    )
+    qtbot.addWidget(win)
+    win.show()
+
+    warned = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a))
+
+    assert win._apply_session_switch("jdoe", target.session_id) is False
+    assert warned and "still open" in warned[0][2]
+    assert session_manager.store.root == was
+
+
+def _roster_user(user_id):
+    """Build a roster entry for *user_id* (tests only)."""
+    from cryosoft.session.models import User
+
+    return User(user_id=user_id, name=user_id.title())
+
+
+def test_new_session_menu_item_creates_a_session_in_a_chosen_folder(
+    station, orchestrator, session_manager_with_sessions, qtbot, monkeypatch
+):
+    """New Session… must reach the folder prompt, not reset the form.
+
+    The menu item used to be a form reset that never touched the Session tier,
+    so an operator starting a new session was never asked for a folder.
+    """
+    from cryosoft.gui import monitor_window as mw
+
+    session_manager, store = session_manager_with_sessions
+    win = MonitorWindow(
+        station, orchestrator, session_manager=session_manager, session_store=store
+    )
+    qtbot.addWidget(win)
+    win.show()
+
+    seen = {}
+
+    class _Dialog:
+        DialogCode = QDialog.DialogCode
+
+        def __init__(self, store_, user_id, parent=None, focus_new=False):
+            seen["focus_new"] = focus_new
+            seen["user_id"] = user_id
+            self._made = store_.create_session(
+                name="Fresh", user_id=user_id, session_dirname="fresh_folder"
+            )
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+        def selected_session_id(self):
+            return self._made.session_id
+
+    monkeypatch.setattr(mw, "ResumeSessionDialog", _Dialog)
+    from PyQt6.QtGui import QAction
+
+    actions = {a.text(): a for a in win.findChildren(QAction)}
+    actions["New Session…"].trigger()
+
+    assert seen["focus_new"] is True
+    assert store.get_active() == (seen["user_id"], "fresh_folder")
+    assert session_manager.store.root == store.session_dir(
+        seen["user_id"], "fresh_folder"
+    )
+    assert "Clear Form…" in actions
+def test_load_dialog_lists_all_users_and_returns_the_owner(qtbot, tmp_path):
+    from cryosoft.gui.session_dialogs import ResumeSessionDialog
+    from cryosoft.session.store import SessionStore
+
+    store = SessionStore(tmp_path / "sessions")
+    store.create_session("Mine", "jdoe", session_dirname="mine")
+    store.create_session("Theirs", "akash", session_dirname="theirs")
+    dialog = ResumeSessionDialog(store, "jdoe", all_users=True)
+    qtbot.addWidget(dialog)
+
+    assert dialog._list.count() == 2
+    for index in range(dialog._list.count()):
+        if "akash" in dialog._list.item(index).text():
+            dialog._list.setCurrentItem(dialog._list.item(index))
+    assert dialog.selected_session() == ("akash", "theirs")
+    assert dialog.windowTitle() == "Load Session"
+
+
+def test_load_dialog_browse_selects_the_session_a_json_names(qtbot, tmp_path):
+    from cryosoft.gui.session_dialogs import ResumeSessionDialog
+    from cryosoft.session.store import SessionStore
+
+    store = SessionStore(tmp_path / "sessions")
+    store.create_session("Mine", "jdoe", session_dirname="mine")
+    store.create_session("Theirs", "akash", session_dirname="theirs")
+    dialog = ResumeSessionDialog(store, "jdoe", all_users=True)
+    qtbot.addWidget(dialog)
+
+    found = store.session_dir("akash", "theirs") / "session.json"
+    assert dialog.select_session_file(str(found)) is True
+    assert dialog.selected_session() == ("akash", "theirs")
+
+
+def test_load_dialog_browse_refuses_a_file_that_is_not_a_session(qtbot, tmp_path):
+    from cryosoft.gui.session_dialogs import ResumeSessionDialog
+    from cryosoft.session.store import SessionStore
+
+    store = SessionStore(tmp_path / "sessions")
+    store.create_session("Mine", "jdoe", session_dirname="mine")
+    dialog = ResumeSessionDialog(store, "jdoe", all_users=True)
+    qtbot.addWidget(dialog)
+
+    assert dialog.select_session_file(str(tmp_path / "stray" / "session.json")) is False
+    assert not dialog._browse_error_label.isHidden()
+    assert dialog.selected_session() is None
+
+
+def test_load_session_menu_switches_to_the_chosen_users_session(
+    station, orchestrator, session_manager_with_sessions, qtbot, monkeypatch
+):
+    """Loading takes the owner from the choice, not from who is logged in."""
+    from cryosoft.gui import monitor_window as mw
+
+    session_manager, store = session_manager_with_sessions
+    theirs = store.create_session("Theirs", "akash", session_dirname="theirs")
+    win = MonitorWindow(
+        station, orchestrator, session_manager=session_manager, session_store=store
+    )
+    qtbot.addWidget(win)
+    win.show()
+
+    class _Dialog:
+        DialogCode = QDialog.DialogCode
+
+        def __init__(self, store_, user_id, parent=None, all_users=False, **_k):
+            assert all_users is True
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+        def selected_session(self):
+            return ("akash", theirs.session_id)
+
+    monkeypatch.setattr(mw, "ResumeSessionDialog", _Dialog)
+    win._open_load_session_dialog()
+
+    assert store.get_active() == ("akash", "theirs")
+    assert session_manager.store.root == store.session_dir("akash", "theirs")
 
 
 # ── CSV sweep values popup ───────────────────────────────────────────────────

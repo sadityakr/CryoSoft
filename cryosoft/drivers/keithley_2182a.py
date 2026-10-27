@@ -110,6 +110,10 @@ class Keithley2182A:
         the Station must leave every instrument exactly as the operator left
         it.
 
+        The error queue is drained before the write, so the check afterwards
+        can only report what this command itself was refused for — see the
+        comment at the drain.
+
         Args:
             enabled: True to leave the instrument free-running, False (what
                 every CryoSoft reading path wants) for single-shot.
@@ -118,6 +122,22 @@ class Keithley2182A:
             CryoSoftInstrumentError: If the 2182A queues an error for the
                 write (the driver error-reporting standard).
         """
+        # The queue is FIFO and this is the first command the arming path
+        # sends the voltmeter, so it must start from a clean one. A meter
+        # found free-running — the power-up default this very call exists to
+        # undo — has been queueing -213 "Init ignored" against every READ?
+        # since long before CryoSoft opened the session, and the poll below
+        # would pop one of *those* and charge it to a write that cannot
+        # produce -213 at all. Live, 2026-10-05 (GPIB0::28): the first
+        # DC-mode arming of a fresh session failed with exactly that error,
+        # and because the failure left the meter free-running, every retry
+        # failed again on the next queued entry. Draining first is what the
+        # driver error-reporting standard already requires of every recovery
+        # path (``drivers/README.md``): an error queued by an abandoned
+        # sequence is never charged to the next, innocent command. It also
+        # leaves the queue clean for ``set_range()``'s check, the arming
+        # path's next stop.
+        self._drain_error_queue()
         self._write(":INIT:CONT " + ("ON" if enabled else "OFF"))
         self._check_error_queue(f"set_continuous_initiation({enabled!r})")
 

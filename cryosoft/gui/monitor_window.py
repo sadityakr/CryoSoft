@@ -298,10 +298,11 @@ class MonitorWindow(QMainWindow):
         # neither publishes nor analyses anything itself.
         self._eln_publisher = eln_publisher
         self._analysis_runner = analysis_runner
-        # The L6 Session tier above session_manager, used only by the User
-        # menu's Resume Session… action (see _open_resume_session_dialog) —
-        # session_manager's own ExperimentStore stays fixed for this run
-        # regardless of what the operator picks here (deferred-until-restart).
+        # The L6 Session tier above session_manager: the User menu's Resume
+        # Session… action and the post-login follow both pick a session here
+        # and hand it to ExperimentManager.rebind_session(), which replaces
+        # session_manager's ExperimentStore in place — the switch is live,
+        # not deferred to the next launch.
         self._session_store = session_store
         # Tracks the experiment_id last seen by _on_session_experiment_changed,
         # so that handler (and the initial-resume check just below) only acts
@@ -451,15 +452,25 @@ class MonitorWindow(QMainWindow):
         # folders under the active Session's own folder, not last_session.json.
         load_session_action = QAction("Load Session…", self)
         load_session_action.setToolTip(
-            "Switch to another open session (experiment)"
+            "Load any user's Session, or find a session.json on disk, and "
+            "switch to it"
         )
         load_session_action.triggered.connect(self._open_load_session_dialog)
         user_menu.addAction(load_session_action)
 
+        switch_experiment_action = QAction("Switch Experiment…", self)
+        switch_experiment_action.setToolTip(
+            "Switch between the open experiments of the current Session"
+        )
+        switch_experiment_action.triggered.connect(
+            self._open_switch_experiment_dialog
+        )
+        user_menu.addAction(switch_experiment_action)
+
         resume_session_action = QAction("Resume Session…", self)
         resume_session_action.setToolTip(
             "Pick or create the Session (folder holding multiple experiments) "
-            "to use — applies fully on next launch"
+            "this user's experiments are saved in"
         )
         resume_session_action.triggered.connect(self._open_resume_session_dialog)
         user_menu.addAction(resume_session_action)
@@ -477,12 +488,19 @@ class MonitorWindow(QMainWindow):
         user_menu.addAction(eln_action)
 
         user_menu.addSeparator()
-        new_session_action = QAction("New Session", self)
+        new_session_action = QAction("New Session…", self)
         new_session_action.setToolTip(
-            "Clear sample info, parameters, and queue and start a fresh session"
+            "Create a new Session — a folder this user's experiments are "
+            "saved in — and switch to it"
         )
-        new_session_action.triggered.connect(self._on_new_session)
+        new_session_action.triggered.connect(self._open_new_session_dialog)
         user_menu.addAction(new_session_action)
+        clear_form_action = QAction("Clear Form…", self)
+        clear_form_action.setToolTip(
+            "Clear sample info, parameters, and queue (the Session is unchanged)"
+        )
+        clear_form_action.triggered.connect(self._on_clear_form)
+        user_menu.addAction(clear_form_action)
         save_session_action = QAction("Save Session Now", self)
         save_session_action.setToolTip("Write the current session to disk immediately")
         save_session_action.triggered.connect(self._save_session)
@@ -1304,13 +1322,21 @@ class MonitorWindow(QMainWindow):
         if is_session_open:
             session_manager.set_queue([item.to_dict() for item in self._session.queue])
 
-    def _on_new_session(self) -> None:
-        """Clear the session to defaults after user confirmation."""
+    def _on_clear_form(self) -> None:
+        """Clear the form content to defaults after user confirmation.
+
+        Formerly the User menu's "New Session", which is why it still works
+        on ``form_autosave`` state: the name collided with the **Session**
+        tier (a folder of experiments), and an operator who chose "New
+        Session" expecting a folder prompt got a form reset instead. Creating
+        a Session is ``_open_new_session_dialog``; this only clears fields and
+        leaves the active Session untouched.
+        """
         reply = QMessageBox.question(
             self,
-            "New Session",
-            "Clear the current session (sample info, parameters, and queue) "
-            "and start fresh?",
+            "Clear Form",
+            "Clear the sample info, parameters, and queue and start fresh? "
+            "The current Session is not changed.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -1374,6 +1400,11 @@ class MonitorWindow(QMainWindow):
         open keeps its in-memory queue/params from before the switch (it
         re-reads whoever is current the next time it is built).
 
+        The **Session** follows the login too (``_follow_user_session``):
+        sessions are per-user folders, so a user who logs in and keeps
+        writing into the previous user's session folder is the one failure
+        this tier exists to prevent.
+
         Args:
             user_id: The roster id to switch to.
         """
@@ -1383,12 +1414,155 @@ class MonitorWindow(QMainWindow):
         self._session = form_autosave.load(app_settings.autosave_file_path(user_id))
         self._session_info.apply_session(self._session)
         self._sync_current_user_label()
+        self._follow_user_session(user_id)
+
+    def _follow_user_session(self, user_id: str) -> None:
+        """Move the active Session to one ``user_id`` owns, asking if needed.
+
+        Sessions nest under their owner (``sessions/<user_id>/``), so after a
+        login the active session must be one this user owns — otherwise the
+        experiments they start are written into somebody else's folder while
+        carrying their name, which is exactly how one user's session came to
+        hold another's experiments.
+
+        Does nothing when the active session is already theirs. Otherwise:
+        the single session they own is adopted silently; several, or none,
+        opens ``Resume Session…`` so they choose or create one. A user who
+        cancels is told plainly that the previous owner's session is still
+        the active one rather than being left to assume otherwise.
+
+        Args:
+            user_id: The roster id just switched to.
+        """
+        if self._session_manager is None or self._session_store is None:
+            return
+        active = self._session_store.get_active()
+        if active is not None and active[0] == user_id:
+            return
+        owned = self._session_store.list_sessions(user_id)
+        if len(owned) == 1:
+            self._apply_session_switch(user_id, owned[0])
+            return
+        self._prompt_for_session(user_id, warn_if_declined=True)
+
+    def _apply_session_switch(self, user_id: str, session_id: str) -> bool:
+        """Rebind the Session Manager onto one session, reporting any refusal.
+
+        The GUI half of ``ExperimentManager.rebind_session()``: the session
+        layer owns the rule (an open experiment blocks the switch, because
+        the open record belongs to the folder it was written in), and this
+        renders it. A refusal is shown as a modal because the operator just
+        asked for this directly — it answers their click, it is not an
+        Orchestrator event.
+
+        Args:
+            user_id: Owner of the target session.
+            session_id: The target session's store key.
+
+        Returns:
+            True when the manager now points at that session.
+        """
+        if self._session_manager is None:
+            return False
+        try:
+            self._session_manager.rebind_session(user_id, session_id)
+        except (ValueError, RuntimeError, OSError) as exc:
+            QMessageBox.warning(self, "Session not switched", str(exc))
+            return False
+        self._status_bar.showMessage(f"Session: {user_id}/{session_id}", 5000)
+        logger.info("Active session switched to %s/%s", user_id, session_id)
+        return True
+
+    def _prompt_for_session(
+        self, user_id: str, *, warn_if_declined: bool, focus_new: bool = False
+    ) -> None:
+        """Open ``ResumeSessionDialog`` for *user_id* and apply what it returns.
+
+        Shared by the User menu's own action and by the post-login follow,
+        which differ only in what a cancel means: cancelling the menu action
+        is "never mind", while cancelling the one offered at login leaves the
+        previous owner's session active and the operator is told so.
+
+        Args:
+            user_id: Whose sessions to list, and who owns anything created.
+            warn_if_declined: Report an active session this user does not own
+                when they close the dialog without picking one.
+            focus_new: Start with the cursor in the new-session name field
+                (the menu's New Session…) rather than on the session list.
+        """
+        if self._session_store is None:
+            return
+        dialog = ResumeSessionDialog(
+            self._session_store, user_id, self, focus_new=focus_new
+        )
+        accepted = dialog.exec() == dialog.DialogCode.Accepted
+        session_id = dialog.selected_session_id() if accepted else None
+        if not session_id:
+            if warn_if_declined:
+                self._warn_session_not_owned(user_id)
+            return
+        self._apply_session_switch(user_id, session_id)
+
+    def _warn_session_not_owned(self, user_id: str) -> None:
+        """Say so when the active session belongs to somebody else.
+
+        Only fires when the operator declined to pick one, so it reports a
+        state they chose rather than nagging about a normal login.
+
+        Args:
+            user_id: The roster id that has just logged in.
+        """
+        if self._session_store is None:
+            return
+        active = self._session_store.get_active()
+        if active is None or active[0] == user_id:
+            return
+        QMessageBox.information(
+            self,
+            "Session belongs to another user",
+            f"The active session is {active[0]}/{active[1]}, which "
+            f"{user_id} does not own. Experiments started now are saved in "
+            f"{active[0]}'s session folder. Use User → Resume Session… "
+            "to pick or create your own.",
+        )
 
     def _open_load_session_dialog(self) -> None:
-        """Open OpenExperimentDialog and switch to the picked experiment, if any."""
-        if self._session_manager is None:
+        """Open the session loader: every user's sessions, plus Browse for a session.json.
+
+        Loads by switching live (``_apply_session_switch``), so the chosen
+        session becomes the one experiments are saved in. The owner comes
+        from the choice, not from the logged-in user: loading is how work is
+        picked up across owners.
+        """
+        if self._session_store is None:
             QMessageBox.information(
                 self, "Load Session", "Session management is not available."
+            )
+            return
+        dialog = ResumeSessionDialog(
+            self._session_store,
+            self._current_user_id or GUEST_USER_ID,
+            self,
+            all_users=True,
+        )
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            return
+        chosen = dialog.selected_session()
+        if chosen is None:
+            return
+        self._apply_session_switch(*chosen)
+
+    def _open_switch_experiment_dialog(self) -> None:
+        """Open OpenExperimentDialog and switch to the picked experiment, if any.
+
+        Formerly the User menu's Load Session…, which is why its tests and
+        dialog object names still say "load_session": the name collided with
+        the Session tier, and this only moves between experiments inside the
+        active Session.
+        """
+        if self._session_manager is None:
+            QMessageBox.information(
+                self, "Switch Experiment", "Session management is not available."
             )
             return
         dialog = OpenExperimentDialog(self._session_manager, self)
@@ -1398,29 +1572,37 @@ class MonitorWindow(QMainWindow):
         if experiment_id:
             self._switch_experiment(experiment_id)
 
-    def _open_resume_session_dialog(self) -> None:
-        """Open ResumeSessionDialog and persist the picked/created session as active.
+    def _open_new_session_dialog(self) -> None:
+        """Open ``ResumeSessionDialog`` on its new-session form and switch to the result."""
+        if self._session_store is None:
+            QMessageBox.information(
+                self, "New Session", "Session management is not available."
+            )
+            return
+        self._prompt_for_session(
+            self._current_user_id or GUEST_USER_ID,
+            warn_if_declined=False,
+            focus_new=True,
+        )
 
-        Deferred-until-restart, same precedent the old sessions-root relocate
-        action used: ``session_manager``'s own ``ExperimentStore`` stays fixed
-        for the rest of this run regardless of what is picked here (see
-        ``GLOSSARY.md``'s **Session**).
+    def _open_resume_session_dialog(self) -> None:
+        """Open ResumeSessionDialog and switch to the picked/created session.
+
+        The switch takes effect immediately, in this process:
+        ``ExperimentManager.rebind_session()`` replaces the
+        ``ExperimentStore`` rooted in the outgoing session's folder with one
+        rooted in the incoming session's, and persists the new active pair.
+        An open experiment refuses the switch — the open record belongs to
+        the folder it was written in — so the operator closes it first and
+        the refusal says so.
         """
         if self._session_store is None:
             QMessageBox.information(
                 self, "Resume Session", "Session management is not available."
             )
             return
-        user_id = self._current_user_id or GUEST_USER_ID
-        dialog = ResumeSessionDialog(self._session_store, user_id, self)
-        if dialog.exec() != dialog.DialogCode.Accepted:
-            return
-        session_id = dialog.selected_session_id()
-        if not session_id:
-            return
-        self._session_store.set_active(user_id, session_id)
-        self._status_bar.showMessage(
-            "Session updated — applies fully on next launch", 5000
+        self._prompt_for_session(
+            self._current_user_id or GUEST_USER_ID, warn_if_declined=False
         )
 
     def _switch_experiment(self, experiment_id: str) -> None:

@@ -270,6 +270,44 @@ file-format change, not a routine edit.
   pointer written before per-user nesting (`{"active": "..."}`) has neither
   key, so `get_active()` tolerantly returns `None` — the same "unset
   pointer" bootstrap path as a first-ever launch, not a crash.
+- **The active pointer is machine-wide; sessions are per-user folders.** The
+  two only agree if something keeps them agreeing, and when nothing did, a
+  second user's experiments were written into the first user's session folder
+  while carrying the second user's `user_id` — the record named the right
+  owner, the folder did not. Two places enforce it now, and they differ only
+  in whether they may ask: `cryosoft.main._resolve_active_session()` at
+  launch silently re-resolves a pointer naming somebody else's session to one
+  the logged-in user owns (creating one when they own none), and
+  `MonitorWindow._follow_user_session()` does the same on every login,
+  adopting their single session outright and otherwise opening
+  `Resume Session…`. Neither is in this package: contract C11 keeps the
+  session layer out of gui/main, so the rule is applied by the callers and
+  this layer only supplies `list_sessions(user_id)` and the switch itself.
+- **Switching sessions is live, and `rebind_session()` is the only way.**
+  `ExperimentManager.rebind_session(user_id, session_id)` replaces the
+  `ExperimentStore` rooted in the outgoing session's folder with one rooted
+  in the incoming session's, writes the new active pair, clears the run queue
+  (its entries were validated against the experiment just left) and adopts
+  the target session's own active-experiment pointer. Single-writer applies:
+  this class owns experiment state, so nothing else may swap the store under
+  it. **An open experiment refuses the switch** — the open record belongs to
+  the folder it was written in, and because a run can only be in flight while
+  an experiment is open, that one rule covers the live run too.
+- **A session on disk can be found, not only listed.** `list_all_sessions()`
+  returns every `(user_id, session_id)` in the store, and `locate(path)`
+  resolves a `session.json` (or its folder) to one. The answer is read from
+  the PATH — `<root>/<user_id>/<session_id>` — never from the file's own
+  `user_id` field, and a session outside the store's root yields `None`
+  rather than being adopted: every consumer roots its `ExperimentStore` from
+  `session_dir()`, so an outside folder could be listed but never written to
+  coherently. This is what the GUI's Load Session Browse button sits on.
+- **A session's folder name is chosen, not only derived.**
+  `create_session(name, user_id, session_dirname=...)` takes the operator's
+  folder; `validate_session_dirname()` is the single rule it is judged by
+  (one segment directly under the owner, no path separator — both rejected on
+  every platform, never via `os.sep` — no `.`/`..`, no collision within that
+  owner). Omitting it keeps the derived `make_session_id()` slug, which is
+  also what the dialog offers as the default.
 - **`Session.experiments` is flat-only.** Each entry's `experiment_id` is a
   single path segment directly under the session folder — no nested
   subfolders. Since reconciliation rebuilds the whole list from the folder
@@ -407,7 +445,7 @@ file-format change, not a routine edit.
 | File | Responsibility | Key public API | Owning test |
 |------|----------------|----------------|-------------|
 | `models.py` | Tolerant-parse records: users, sessions (the L6 tier above an experiment, incl. its `experiments` index), runs (incl. the per-run `eln_link` the publisher stamps, the `pending_eln_draft` an unapproved **draft entry** waits in, the `actor`/`actor_legacy` pair naming who started it, and the `params_digest` fixing what it started with), experiments (incl. `queue` and `schema_version`), ELN links, servicing-log entries; envelope (de)serialisation. | `SCHEMA_VERSION`, `GUEST_USER_ID`, `GUEST_USER_NAME`, `User`, `Session`, `ExperimentIndexEntry`, `RunRecord`, `ExperimentRecord`, `ElnLink`, `ServiceLogEntry`, `envelope_to_dict`, `envelope_from_dict` | `tests/test_session_layer.py` / `tests/test_servicing_log.py` + conformance |
-| `store.py` | Disk persistence: per-user, per-session folders (`session.json` + machine-wide active pointer) via `SessionStore`, one level above per-experiment folders (`experiment.json`, `gui_state.json`, `data/`, `analysis/` — recipes and one report folder per run) + their own active pointer via `ExperimentStore`; user roster; bundle-relative data-path (de)resolution. | `SessionStore` (`list_sessions(user_id)`, `create_session`, `load(user_id, session_id)`, `save`, `get_active` → `tuple[str, str] \| None`, `set_active(user_id, session_id)`, `make_session_id`), `ExperimentStore` (`list_experiments`, `load`, `save`, `get_active`, `set_active`, `make_experiment_id`, `data_dir`, `gui_state_path`, `outbox_path`, `agent_feed_path`, `analysis_dir`, `recipes_dir`, `report_dir`, `relativize_data_file`, `resolve_data_file`), `UserRoster` (`list_users`, `get`, `add`) | `tests/test_session_layer.py` |
+| `store.py` | Disk persistence: per-user, per-session folders (`session.json` + machine-wide active pointer) via `SessionStore`, one level above per-experiment folders (`experiment.json`, `gui_state.json`, `data/`, `analysis/` — recipes and one report folder per run) + their own active pointer via `ExperimentStore`; user roster; bundle-relative data-path (de)resolution. | `SessionStore` (`list_sessions(user_id)`, `list_all_sessions()`, `locate(path)`, `create_session(name, user_id, session_dirname=None)`, `validate_session_dirname`, `session_dir(user_id, session_id)`, `load(user_id, session_id)`, `save`, `get_active` → `tuple[str, str] \| None`, `set_active(user_id, session_id)`, `make_session_id`), `ExperimentStore` (`list_experiments`, `load`, `save`, `get_active`, `set_active`, `make_experiment_id`, `data_dir`, `gui_state_path`, `outbox_path`, `agent_feed_path`, `analysis_dir`, `recipes_dir`, `report_dir`, `relativize_data_file`, `resolve_data_file`), `UserRoster` (`list_users`, `get`, `add`) | `tests/test_session_layer.py` |
 | `manager.py` | The L6 façade: experiment lifecycle (incl. switching between open experiments, the run queue, and a chosen experiment folder name), automatic run recording from manifests, envelope and attendance installation (both session-owned policy values, pushed down into the engine wherever a record becomes live and on every later change), HDF5 context, save-health surfacing, session experiment-index reconciliation, the single write path for published ELN links, the drafting approval gate, and the run queue (validated adds, ordered mutations, and the engine's pull seam). | `ExperimentManager` (`start_experiment(..., envelope=None, experiment_dirname=None)`, `close_experiment`, `set_findings`, `set_attended`, `set_queue`, `switch_experiment`, `current_data_dir`, `current_gui_state_path`, `experiment_context`, `envelope_variables`, `set_experiment_envelope`, `current_experiment`, `set_run_eln_link`, `attach_eln_publisher`, `set_pending_eln_draft`, `pending_eln_draft`, `approve_eln_draft`, `discard_pending_eln_draft`, `run_queue`, `queue_snapshot`, `queue_entries`, `validate_run`, `queue_run`, `dequeue_run`, `move_queued_run`, `clear_run_queue`, `next_run`; optional `session_store`/`station`/`run_catalog` constructor args; signals `experiment_changed`, `run_recorded`, `store_health_changed`) | `tests/test_session_layer.py` |
 | `run_queue.py` | The run queue as data: immutable **run specs**, their ordering (operations drain before procedures — queue-jumping, never preemption), the one construction path from a spec to the live object the engine starts (both kinds, through `core.run_builder`'s `build_procedure()` / `build_operation()`, with a spec's optional `probe_spec` reducing the built run to a **probe run**), and the add-time **run validation** (declared `ParamSpec` bounds, the headless build, `control_limits` + the **session envelope**, plus the **duration estimate**). Imports no Qt, no Orchestrator, and no `cryosoft.procedures` — the classes a spec names are resolved through an injected run catalog. | `RunSpec`, `RunQueue` (`add`, `remove`, `move`, `clear`, `snapshot`, `entries`, `pop_next`, `find`), `RunFinding`, `RunValidation`, `build_run`, `validate_run`, `KIND_PROCEDURE`, `KIND_OPERATION`, the `FINDING_*` codes | `tests/test_run_queue.py` |
 | `analysis_runner.py` | The analysis stage's client half: builds an `AnalysisSpec` from one run record plus the experiment context and the settings, writes it into `<experiment>/analysis/<run_id>/`, runs `python -m cryosoft.analysis run --spec …` as a bounded `QProcess` (one at a time, FIFO queue, QTimer timeout, no blocking wait), and hands the report back to the ELN publisher — an **analysed entry** when it ran, the facts fallback when it did not. | `AnalysisRunner` (`start`, `cancel`, `is_running`, `recipe_dirs`; signals `analysis_started`, `analysis_finished`, `analysis_failed`) | `tests/test_analysis_runner.py` |

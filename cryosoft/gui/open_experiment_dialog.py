@@ -33,7 +33,7 @@ class OpenExperimentDialog(QDialog):
         self, session_manager: ExperimentManager, parent: QWidget | None = None
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Load Session")
+        self.setWindowTitle("Switch Experiment")
         self._session_manager = session_manager
 
         self._list = QListWidget()

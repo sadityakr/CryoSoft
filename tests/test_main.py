@@ -119,3 +119,61 @@ def test_ensure_guest_user_registered_does_not_clobber_existing_guest_customizat
     _ensure_guest_user_registered(roster)
 
     assert roster.get(GUEST_USER_ID).name == "Visiting Scientist"
+
+
+def test_resolve_active_session_does_not_hand_a_user_someone_elses_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reported bug: everyone kept landing in the first user's session.
+
+    The active pointer is machine-wide while sessions are per-user folders,
+    so a pointer left on the previous user's session must not be handed to
+    whoever logs in next — their experiments would be written into that
+    user's folder while carrying their own name.
+    """
+    from cryosoft.gui import app_settings
+
+    store = SessionStore(tmp_path / "sessions")
+    theirs = store.create_session(name="lennart", user_id="lennart")
+    store.set_active("lennart", theirs.session_id)
+    mine = store.create_session(name="akashdeep", user_id="akashdeep")
+    monkeypatch.setattr(app_settings, "current_user_id", lambda: "akashdeep")
+
+    user_id, session_id = _resolve_active_session(store)
+
+    assert (user_id, session_id) == ("akashdeep", mine.session_id)
+    assert store.get_active() == ("akashdeep", mine.session_id)
+
+
+def test_resolve_active_session_creates_one_for_a_user_who_owns_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A new user inherits nobody's session — they get their own."""
+    from cryosoft.gui import app_settings
+
+    store = SessionStore(tmp_path / "sessions")
+    theirs = store.create_session(name="lennart", user_id="lennart")
+    store.set_active("lennart", theirs.session_id)
+    monkeypatch.setattr(app_settings, "current_user_id", lambda: "aditya")
+
+    user_id, session_id = _resolve_active_session(store)
+
+    assert user_id == "aditya"
+    assert store.get_active() == ("aditya", session_id)
+    # lennart's own session is untouched by any of this.
+    assert store.list_sessions("lennart") == [theirs.session_id]
+
+
+def test_resolve_active_session_keeps_the_pointer_when_it_is_already_yours(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Owning several sessions must not silently move you off the active one."""
+    from cryosoft.gui import app_settings
+
+    store = SessionStore(tmp_path / "sessions")
+    first = store.create_session(name="One", user_id="jdoe", session_dirname="one")
+    store.create_session(name="Two", user_id="jdoe", session_dirname="two")
+    store.set_active("jdoe", first.session_id)
+    monkeypatch.setattr(app_settings, "current_user_id", lambda: "jdoe")
+
+    assert _resolve_active_session(store) == ("jdoe", first.session_id)

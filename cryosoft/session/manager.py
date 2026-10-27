@@ -354,6 +354,82 @@ class ExperimentManager(QObject):
             )
         return candidate
 
+    def rebind_session(self, user_id: str, session_id: str) -> None:
+        """Point this manager at a different Session, in this process.
+
+        The Session tier's switch. ``ExperimentStore`` is rooted inside one
+        session's folder, so moving between sessions means replacing it —
+        and because this class is the single writer of experiment state,
+        here is the only place that may do so. Afterwards the manager reads
+        and writes the new session's folder, its active-experiment pointer
+        is the one resumed, and ``_current_session_identity()`` (derived from
+        ``self._store.root``) reports the new pair with no second source of
+        truth to drift.
+
+        **An open experiment blocks the switch.** The open record belongs to
+        the folder it was written in, and a run in flight is recorded onto
+        it, so leaving the session underneath it would strand both. One rule
+        covers both cases: a run can only be in flight while an experiment is
+        open, so refusing on the open experiment refuses on the live run too.
+        The caller closes the experiment and asks again.
+
+        Args:
+            user_id: Roster key of the target session's owner.
+            session_id: The target session's store key.
+
+        Raises:
+            RuntimeError: If no ``session_store`` was given at construction —
+                this manager has no Session tier to move within.
+            ValueError: If an experiment is still open, or the target session
+                record does not load.
+            OSError: If the active-session pointer cannot be written.
+        """
+        if self._session_store is None:
+            raise RuntimeError(
+                "This ExperimentManager was built without a session store; "
+                "there is no Session tier to switch within."
+            )
+        if self._experiment is not None:
+            raise ValueError(
+                f"Experiment {self._experiment.experiment_id!r} is still open; "
+                "close it before switching session."
+            )
+        session = self._session_store.load(user_id, session_id)
+        if session is None:
+            raise ValueError(
+                f"No session {session_id!r} owned by {user_id!r} — it is "
+                "missing or its session.json cannot be read."
+            )
+        previous = self._current_session_identity()
+        self._store = ExperimentStore(
+            self._session_store.session_dir(user_id, session_id)
+        )
+        self._session_store.set_active(user_id, session_id)
+        session.last_opened_utc = _utc_now_iso()
+        try:
+            self._session_store.save(session)
+        except OSError:
+            # The pointer is already written and the store already swapped —
+            # a failed timestamp must not undo a switch that has happened.
+            logger.exception("Could not stamp last_opened_utc on %s", session_id)
+        logger.info(
+            "Session switched: %s -> %s/%s",
+            "/".join(previous) if previous else "(none)",
+            user_id,
+            session_id,
+        )
+        # A fresh session starts with nothing queued: the queue is the
+        # outgoing session's work, and its entries were validated against
+        # the experiment that is now closed.
+        self._queue_host.clear(actor=OPERATOR)
+        # Adopt the new session's own resume pointer. When it has none,
+        # _resume_active_experiment() returns without emitting, so say
+        # "nothing open" explicitly — the GUI has just been told the old
+        # experiment closed and must not be left showing it.
+        self._resume_active_experiment()
+        if self._experiment is None:
+            self.experiment_changed.emit({})
+
     def close_experiment(self) -> None:
         """Close the open experiment and clear the envelope. No-op when none."""
         if self._experiment is None:

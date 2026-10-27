@@ -111,6 +111,15 @@ call** (a bus failure while reading the queue/register is swallowed), and
 `stop_delta_mode()`), so an error queued by an abandoned sequence is never
 charged to the next, innocent command.
 
+The same reasoning applies to the *first* command of an arming sequence on an
+instrument CryoSoft did not leave as it found it. A SCPI error queue is FIFO,
+so the first poll of a session returns the oldest entry, which may predate the
+session entirely: the 2182A ships free-running and queues `-213 "Init ignored"`
+against every `READ?` until something stops it, so
+`set_continuous_initiation()` — the command that stops it — drains before it
+writes. Where a driver's first checked write lands on a queue it did not fill,
+drain first; otherwise the check reports the previous occupant of the bench.
+
 | Driver | Verification | Refusal `code` |
 |---|---|---|
 | `keithley_6221.py` | Error queue (`:SYST:ERR?`) after output/current/compliance/range writes, after the delta programming sequence, and after both `:SOUR:DELT:ARM` and `:INIT:IMM` | the SCPI code, e.g. `-221` |

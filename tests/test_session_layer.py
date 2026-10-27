@@ -1395,3 +1395,207 @@ def test_an_operation_spec_jumps_the_whole_queue(queue_manager, tmp_path):
         "SomeOperation",
         "FieldSweep",
     ]
+
+
+# ── Session tier: the live switch (ExperimentManager.rebind_session) ─────────
+
+
+def test_a_chosen_session_folder_name_is_what_the_session_gets(session_store):
+    """The operator names the folder; it is not only derived from the name."""
+    session = session_store.create_session(
+        "R vs T", "jdoe", session_dirname="rvst_project"
+    )
+    assert session.session_id == "rvst_project"
+    assert (session_store.root / "jdoe" / "rvst_project" / "session.json").is_file()
+    assert session_store.session_dir("jdoe", "rvst_project") == (
+        session_store.root / "jdoe" / "rvst_project"
+    )
+
+
+@pytest.mark.parametrize(
+    "bad", ["", "   ", "a/b", "a\\b", ".", ".."]
+)
+def test_an_unusable_session_folder_name_is_refused(session_store, bad):
+    """A session names ONE folder under its owner — never a nested path."""
+    with pytest.raises(ValueError):
+        session_store.create_session("R vs T", "jdoe", session_dirname=bad)
+
+
+def test_a_colliding_session_folder_name_is_refused(session_store):
+    """Two sessions may share a display name but never a folder."""
+    session_store.create_session("R vs T", "jdoe", session_dirname="rvst")
+    with pytest.raises(ValueError, match="already exists"):
+        session_store.create_session("R vs T again", "jdoe", session_dirname="rvst")
+
+
+def test_the_same_folder_name_under_two_owners_does_not_collide(session_store):
+    """Collisions are scoped to one user's own folder, like make_session_id."""
+    session_store.create_session("R vs T", "jdoe", session_dirname="rvst")
+    other = session_store.create_session("R vs T", "akash", session_dirname="rvst")
+    assert other.session_id == "rvst"
+    assert session_store.list_sessions("jdoe") == ["rvst"]
+    assert session_store.list_sessions("akash") == ["rvst"]
+
+
+def test_rebinding_moves_where_experiments_are_written(indexed_manager, roster):
+    """The bug this fixes: a second user's experiment landed in the first's folder.
+
+    After the switch the manager must write into the TARGET session's folder,
+    not the one it was constructed with.
+    """
+    manager, session_store, first = indexed_manager
+    second = session_store.create_session("Akash's work", "akash", session_dirname="akash_rvst")
+    roster.add(User(user_id="akash", name="Akash"))
+
+    manager.rebind_session("akash", second.session_id)
+    record = manager.start_experiment(
+        title="RvsT", user_id="akash", sample_info=SAMPLE_INFO
+    )
+
+    written = session_store.root / "akash" / "akash_rvst" / record.experiment_id
+    assert (written / "experiment.json").is_file()
+    # ... and nothing of it was written into the session we came from.
+    assert not (
+        session_store.root / "jdoe" / first.session_id / record.experiment_id
+    ).exists()
+
+
+def test_rebinding_reports_the_new_session_identity(indexed_manager):
+    """_current_session_identity() is derived from the store, so it follows."""
+    manager, session_store, _first = indexed_manager
+    session_store.create_session("Second", "jdoe", session_dirname="second")
+
+    manager.rebind_session("jdoe", "second")
+
+    assert manager._current_session_identity() == ("jdoe", "second")
+    assert manager.store.root == session_store.session_dir("jdoe", "second")
+    assert session_store.get_active() == ("jdoe", "second")
+
+
+def test_rebinding_is_refused_while_an_experiment_is_open(indexed_manager):
+    """An open record belongs to the folder it was written in."""
+    manager, session_store, first = indexed_manager
+    session_store.create_session("Second", "jdoe", session_dirname="second")
+    manager.start_experiment(title="Open one", user_id="jdoe", sample_info=SAMPLE_INFO)
+
+    with pytest.raises(ValueError, match="still open"):
+        manager.rebind_session("jdoe", "second")
+
+    # Nothing moved: the manager still writes where it did.
+    assert manager._current_session_identity() == ("jdoe", first.session_id)
+
+
+def test_rebinding_to_a_session_that_does_not_load_is_refused(indexed_manager):
+    """A missing session.json is a refusal, not a silently created folder."""
+    manager, _session_store, first = indexed_manager
+    with pytest.raises(ValueError, match="No session"):
+        manager.rebind_session("jdoe", "never_created")
+    assert manager._current_session_identity() == ("jdoe", first.session_id)
+
+
+def test_rebinding_resumes_the_target_sessions_own_open_experiment(
+    indexed_manager, qtbot
+):
+    """Each session has its own active-experiment pointer; the switch adopts it.
+
+    An experiment can only be left open in a session you are not currently in
+    by an earlier process (switching away while one is open is refused), so
+    that is the state built here: a record saved into the second session's
+    folder with its own active pointer set, exactly as a previous launch
+    would have left it.
+    """
+    manager, session_store, _first = indexed_manager
+    session_store.create_session("Second", "jdoe", session_dirname="second")
+    other_store = ExperimentStore(session_store.session_dir("jdoe", "second"))
+    left_open = ExperimentRecord(
+        experiment_id="20260805_left_open",
+        title="Left open",
+        user_id="jdoe",
+        status=EXPERIMENT_STATUS_OPEN,
+    )
+    other_store.save(left_open)
+    other_store.set_active(left_open.experiment_id)
+
+    manager.rebind_session("jdoe", "second")
+
+    assert manager.current_experiment() is not None
+    assert manager.current_experiment().experiment_id == "20260805_left_open"
+
+
+def test_rebinding_announces_an_empty_experiment_when_the_target_has_none(
+    indexed_manager, qtbot
+):
+    """The GUI must not be left showing the session it just left."""
+    manager, session_store, _first = indexed_manager
+    session_store.create_session("Second", "jdoe", session_dirname="second")
+
+    with qtbot.waitSignal(manager.experiment_changed, timeout=1000) as blocker:
+        manager.rebind_session("jdoe", "second")
+    assert blocker.args[0] == {}
+
+
+def test_rebinding_clears_the_outgoing_sessions_queue(indexed_manager):
+    """Queued work belongs to the session it was validated in."""
+    manager, session_store, _first = indexed_manager
+    session_store.create_session("Second", "jdoe", session_dirname="second")
+    manager.run_queue_host.add_spec(
+        RunSpec(kind=KIND_OPERATION, run_class="FieldSweep")
+    )
+    assert manager.queue_entries()
+
+    manager.rebind_session("jdoe", "second")
+
+    assert not manager.queue_entries()
+
+
+def test_a_manager_without_a_session_store_cannot_switch(manager):
+    """No Session tier wired means there is nothing to switch within."""
+    with pytest.raises(RuntimeError, match="without a session store"):
+        manager.rebind_session("jdoe", "anything")
+
+
+# ── Load Session: every user's sessions, and finding a session.json ───────────
+
+
+def test_list_all_sessions_spans_every_owner(session_store):
+    """Load Session lists anyone's session, not only the logged-in user's."""
+    session_store.create_session("A", "jdoe", session_dirname="a_one")
+    session_store.create_session("B", "akash", session_dirname="b_one")
+    session_store.create_session("C", "akash", session_dirname="b_two")
+
+    assert session_store.list_all_sessions() == [
+        ("akash", "b_one"),
+        ("akash", "b_two"),
+        ("jdoe", "a_one"),
+    ]
+
+
+def test_list_all_sessions_on_a_missing_root_is_empty(tmp_path):
+    assert SessionStore(tmp_path / "nowhere").list_all_sessions() == []
+
+
+def test_locate_resolves_a_session_json_and_its_folder(session_store):
+    """The owner is read from the path (structural), not from the file's field."""
+    session_store.create_session("A", "akash", session_dirname="b_one")
+    folder = session_store.session_dir("akash", "b_one")
+
+    assert session_store.locate(folder / "session.json") == ("akash", "b_one")
+    assert session_store.locate(folder) == ("akash", "b_one")
+
+
+def test_locate_refuses_a_session_outside_the_store(session_store, tmp_path):
+    """A folder elsewhere could be listed but never written to coherently."""
+    other = SessionStore(tmp_path / "elsewhere")
+    other.create_session("A", "akash", session_dirname="b_one")
+    session_store.create_session("Mine", "jdoe", session_dirname="mine")
+
+    assert session_store.locate(other.session_dir("akash", "b_one")) is None
+
+
+def test_locate_refuses_paths_that_are_not_a_session(session_store):
+    """Wrong depth, or no readable session.json, is not a session."""
+    session_store.create_session("A", "akash", session_dirname="b_one")
+    assert session_store.locate(session_store.root / "akash") is None
+    assert session_store.locate(session_store.root) is None
+    (session_store.root / "akash" / "empty").mkdir()
+    assert session_store.locate(session_store.root / "akash" / "empty") is None

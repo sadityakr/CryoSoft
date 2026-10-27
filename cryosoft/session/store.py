@@ -462,6 +462,59 @@ class SessionStore:
             counter += 1
         return candidate
 
+    def list_all_sessions(self) -> list[tuple[str, str]]:
+        """Return every session in the store as ``(user_id, session_id)`` pairs.
+
+        What the Load Session dialog lists: any user's session, not only the
+        logged-in user's, since loading one is how work is picked up across
+        owners. Sorted by user then session id; a user folder without a
+        ``session.json`` inside any child contributes nothing.
+
+        Returns:
+            Every ``(user_id, session_id)`` pair; ``[]`` when the store root
+            does not exist.
+        """
+        if not self._root.is_dir():
+            return []
+        found: list[tuple[str, str]] = []
+        for user_dir in sorted(p for p in self._root.iterdir() if p.is_dir()):
+            for session_id in self.list_sessions(user_dir.name):
+                found.append((user_dir.name, session_id))
+        return found
+
+    def locate(self, path: str | Path) -> tuple[str, str] | None:
+        """Resolve a ``session.json`` (or its folder) to ``(user_id, session_id)``.
+
+        The Browse half of Load Session: the operator points at a file on
+        disk and this says which session of this store it is. The store's
+        layout is structural — ``<root>/<user_id>/<session_id>/session.json``
+        — so the answer is read from the path, never from the file's own
+        ``user_id`` field, and a session outside this store's root is
+        refused (``None``) rather than adopted: every consumer roots its
+        ``ExperimentStore`` from ``session_dir()``, so an outside folder
+        could be listed but never written to coherently.
+
+        Args:
+            path: A ``session.json`` file, or the session folder holding one.
+
+        Returns:
+            ``(user_id, session_id)``, or ``None`` when the path is not a
+            loadable session directly inside this store's root.
+        """
+        candidate = Path(path)
+        if candidate.name == _SESSION_FILENAME:
+            candidate = candidate.parent
+        try:
+            relative = candidate.resolve().relative_to(self._root.resolve())
+        except (OSError, ValueError):
+            return None
+        if len(relative.parts) != 2:
+            return None
+        user_id, session_id = relative.parts
+        if self.load(user_id, session_id) is None:
+            return None
+        return user_id, session_id
+
     def list_sessions(self, user_id: str) -> list[str]:
         """Return every session id owned by ``user_id`` (sorted; [] when none).
 
@@ -485,22 +538,99 @@ class SessionStore:
             if entry.is_dir() and (entry / _SESSION_FILENAME).is_file()
         )
 
-    def create_session(self, name: str, user_id: str) -> Session:
+    def session_dir(self, user_id: str, session_id: str) -> Path:
+        """Return the folder one session owns, whether or not it exists yet.
+
+        The single source of truth for the Session tier's layout
+        (``<root>/<user_id>/<session_id>``), so a caller that has to root an
+        ``ExperimentStore`` inside a session — ``cryosoft.main`` at launch,
+        ``ExperimentManager.rebind_session()`` on a live switch — never
+        rebuilds that path by hand and cannot drift from ``load``/``save``.
+
+        Args:
+            user_id: Roster key of the owner (the session's first path
+                segment).
+            session_id: The store key (the session's own folder name).
+
+        Returns:
+            The session folder path. Pure: nothing is created or checked.
+        """
+        return self._root / user_id / session_id
+
+    def validate_session_dirname(self, dirname: str, user_id: str) -> str:
+        """Return *dirname* as a usable session folder name, or raise.
+
+        The Session tier's half of the folder-name rule
+        ``ExperimentManager._resolve_experiment_id()`` applies one level
+        down, and for the same reasons: a session names ONE folder directly
+        under its owner, never a nested path, and never an existing one.
+        Both separators are rejected on every platform rather than via
+        ``os.sep``/``os.altsep`` — a session folder written on Linux is
+        routinely opened on a Windows analysis machine, where a backslash
+        would split into a nested path.
+
+        Args:
+            dirname: The folder name the operator chose (whitespace is
+                stripped).
+            user_id: Roster key of the intended owner, whose own folder the
+                collision check is scoped to.
+
+        Returns:
+            The validated, stripped folder name.
+
+        Raises:
+            ValueError: If the name is empty, contains a path separator, is
+                ``"."``/``".."``, or collides with one of ``user_id``'s
+                existing sessions.
+        """
+        candidate = dirname.strip()
+        if not candidate:
+            raise ValueError("Session folder name must not be empty")
+        if "/" in candidate or "\\" in candidate:
+            raise ValueError(
+                f"Session folder name {dirname!r} must not contain a path "
+                "separator — it names a single folder directly under the "
+                "owner, not a nested path"
+            )
+        if candidate in (".", ".."):
+            raise ValueError(f"Session folder name {dirname!r} is not allowed")
+        if candidate in self.list_sessions(user_id):
+            raise ValueError(
+                f"A session folder named {candidate!r} already exists for {user_id!r}"
+            )
+        return candidate
+
+    def create_session(
+        self, name: str, user_id: str, session_dirname: str | None = None
+    ) -> Session:
         """Create, save, and return a new ``Session`` owned by ``user_id``.
 
         Args:
             name: The session's display name.
             user_id: Roster key of the owner.
+            session_dirname: Optional override for the session's folder name
+                (and therefore its ``session_id``), directly under
+                ``<root>/<user_id>/`` — flat only, no nesting. ``None`` (the
+                default) falls back to the derived
+                ``make_session_id(name, created, user_id)``. The operator
+                picks this in the Resume Session dialog, which is why the
+                folder a session owns is chosen rather than only derived.
 
         Returns:
             The newly created, already-saved ``Session``.
 
         Raises:
+            ValueError: If ``session_dirname`` is given but invalid (see
+                ``validate_session_dirname``).
             OSError: If the file cannot be written.
         """
         created = _utc_now_iso()
+        if session_dirname is None:
+            session_id = self.make_session_id(name, created, user_id)
+        else:
+            session_id = self.validate_session_dirname(session_dirname, user_id)
         session = Session(
-            session_id=self.make_session_id(name, created, user_id),
+            session_id=session_id,
             user_id=user_id,
             name=name,
             created_utc=created,
