@@ -10,11 +10,15 @@ from PyQt6.QtGui import QBrush, QColor
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
     QHeaderView,
+    QLabel,
     QLineEdit,
+    QListWidget,
     QPushButton,
     QStackedWidget,
     QTableWidget,
@@ -23,7 +27,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from cryosoft.core.sweep_builder import SweepAxis
+from cryosoft.core.sweep_builder import SweepAxis, load_custom_sweep_csv
 from cryosoft.gui.theme import BG_BASE, BG_ELEVATED, TEXT_MUTED, TEXT_PRIMARY
 
 # Row order matches the QComboBox item order; index <-> mode string.
@@ -44,6 +48,50 @@ _SEGMENT_COLUMN_WIDTH = 70
 # Shown (as a tooltip and placeholder) on the last row's Step cell so its
 # disabled state reads as intentional rather than a broken/unresponsive field.
 _LAST_ROW_STEP_TOOLTIP = "No step: add another breakpoint to set this segment's step."
+
+
+class CsvValuesDialog(QDialog):
+    """Modal popup listing the values read from a sweep CSV file, in a scrollable list.
+
+    A file that cannot be read is reported inside the dialog (no second modal),
+    so the user sees exactly why the sweep would be refused.
+
+    Args:
+        path: Path to the single-column CSV file.
+        unit: Unit label appended to each value (may be empty).
+        parent: Optional Qt parent widget.
+    """
+
+    def __init__(self, path: str, unit: str = "", parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("sweep_csv_values_dialog")
+        self.setWindowTitle("CSV sweep values")
+        self.setMinimumSize(280, 320)
+        layout = QVBoxLayout(self)
+
+        self._summary = QLabel()
+        self._summary.setObjectName("sweep_csv_values_summary")
+        self._summary.setWordWrap(True)
+        layout.addWidget(self._summary)
+
+        self._list = QListWidget()
+        self._list.setObjectName("sweep_csv_values_list")
+        layout.addWidget(self._list)
+
+        try:
+            values = load_custom_sweep_csv(path)
+        except (OSError, ValueError) as exc:
+            self._summary.setText(f"Cannot read values: {exc}")
+        else:
+            suffix = f" {unit}" if unit else ""
+            self._summary.setText(f"{len(values)} values read from {path}")
+            self._list.addItems(
+                [f"{i}:  {value:g}{suffix}" for i, value in enumerate(values, start=1)]
+            )
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
 
 
 class SweepAxisWidget(QWidget):
@@ -163,8 +211,13 @@ class SweepAxisWidget(QWidget):
         browse_btn = QPushButton("Browse...")
         browse_btn.setObjectName(f"sweep_{k}_csv_browse_btn")
         browse_btn.clicked.connect(self._on_browse_csv)
+        view_btn = QPushButton("View values...")
+        view_btn.setObjectName(f"sweep_{k}_csv_view_btn")
+        view_btn.setToolTip("Show the values read from this CSV file")
+        view_btn.clicked.connect(self._on_view_csv)
         row.addWidget(self._csv_input)
         row.addWidget(browse_btn)
+        row.addWidget(view_btn)
         return page
 
     # ------------------------------------------------------------------
@@ -235,6 +288,14 @@ class SweepAxisWidget(QWidget):
         )
         if path:
             self._csv_input.setText(path)
+            self._on_view_csv()
+
+    def _on_view_csv(self) -> None:
+        """Open the popup listing the values the chosen CSV file holds."""
+        path = self._csv_input.text().strip()
+        if not path:
+            return
+        CsvValuesDialog(path, self._axis.unit, self).exec()
 
     # ------------------------------------------------------------------
     # Public API consumed by ProcedureWindow

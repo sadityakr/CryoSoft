@@ -58,7 +58,7 @@ FAST_TEMP = {
     "temperature_end": 300.0,  # same start/end → instant ramp settle in sim
     "temperature_steps": 3,
     "ramp_rate_K_per_min": 6000.0,
-    "point_wait": 0.0,
+    "dwell_time": 0.0,
 }
 
 FIELD_MEAS = [pytest.param(DELTA, id="delta"), pytest.param(DC, id="dc")]
@@ -291,9 +291,9 @@ def test_temp_sweep_initiate_full_phaseplan(station, tmp_path, meas):
     proc.standby()
 
     assert plan.targets["temperature_vti"] == Target(300.0, rate=6000.0)
-    # sim_cryostat has magnet_z + magnet_y; field_z/field_y default 0.0.
+    # field_z defaults to 0.0; the sweep never touches magnet_y.
     assert plan.targets["magnet_z"] == Target(0.0)
-    assert plan.targets["magnet_y"] == Target(0.0)
+    assert "magnet_y" not in plan.targets
 
     # TemperatureSweep keeps the default claim too — every station VI.
     assert [c.vi_name for c in plan.claim_commands] == station.get_vi_names()
@@ -391,15 +391,14 @@ def _partial_station(*keep: str):
 
 
 def test_temp_sweep_missing_magnet_with_zero_field_is_skipped(tmp_path):
-    """A station without magnet_y still runs the sweep at field_y=0."""
-    station = _partial_station("magnet_z", "temperature_vti", "dc_measurement")
+    """A station without magnet_z still runs the sweep at field_z=0."""
+    station = _partial_station("temperature_vti", "dc_measurement")
     proc = TemperatureSweep(
         station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
         **FAST_TEMP, **DC,
     )
     plan = proc.initiate()
-    assert "magnet_y" not in plan.targets
-    assert "magnet_z" in plan.targets
+    assert "magnet_z" not in plan.targets
     assert "temperature_vti" in plan.targets
     proc.standby()
 
@@ -408,11 +407,11 @@ def test_temp_sweep_missing_magnet_with_nonzero_field_is_refused(tmp_path):
     """A NONZERO field on a missing magnet must fail at construction."""
     from cryosoft.core.exceptions import CryoSoftConfigError
 
-    station = _partial_station("magnet_z", "temperature_vti", "dc_measurement")
-    with pytest.raises(CryoSoftConfigError, match="magnet_y"):
+    station = _partial_station("temperature_vti", "dc_measurement")
+    with pytest.raises(CryoSoftConfigError, match="magnet_z"):
         TemperatureSweep(
             station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
-            **{**FAST_TEMP, **DC, "field_y": 0.5},
+            **{**FAST_TEMP, **DC, "field_z": 0.5},
         )
 
 
@@ -1240,9 +1239,9 @@ def test_field_sweep_enabled_channel_without_vi_is_refused(tmp_path):
 
     station = _partial_station("magnet_z", "temperature_vti", "dc_measurement")
     with pytest.raises(CryoSoftConfigError, match="temperature_sample"):
-        FieldSweep(
+        TemperatureSweep(
             station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
-            **{**FAST_FIELD, **DC, "set_sample_temperature": True},
+            **{**FAST_TEMP, **DC, "set_sample_temperature": True},
         )
 
 
@@ -1269,23 +1268,52 @@ def test_temp_sweep_vti_off_emits_no_targets_on_initiate_or_step(station, tmp_pa
     proc.standby()
 
 
-def test_temp_sweep_holds_sample_setpoint_only_on_initiate(station, tmp_path):
-    """The sample stage is set once at initiate, not re-sent at every step."""
-    from cryosoft.core.exceptions import CryoSoftConfigError
-
+def test_temp_sweep_sample_follows_sweep_with_offset(station, tmp_path):
+    """The sample setpoint is the swept value plus sample_offset, at the sweep rate."""
     proc = TemperatureSweep(
         station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
         **{**FAST_TEMP, **DC,
-           "set_sample_temperature": True, "sample_temperature": 7.5},
+           "set_sample_temperature": True, "sample_offset": -2.5},
     )
-    assert proc.initiate().targets["temperature_sample"].target == pytest.approx(7.5)
+    initial = proc.initiate().targets
+    assert initial["temperature_vti"] == Target(300.0, rate=6000.0)
+    assert initial["temperature_sample"] == Target(297.5, rate=6000.0)
     step = proc.change_sweep_step()
-    assert step is not None and "temperature_sample" not in step.targets
+    assert step is not None
+    assert step.targets["temperature_sample"] == Target(297.5, rate=6000.0)
     proc.standby()
+
+
+def test_temp_sweep_sample_off_emits_no_sample_target(station, tmp_path):
+    """sample_offset is ignored while set_sample_temperature is off."""
+    proc = TemperatureSweep(
+        station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
+        **{**FAST_TEMP, **DC, "sample_offset": 5.0},
+    )
+    assert "temperature_sample" not in proc.initiate().targets
+    proc.standby()
+
+
+def test_temp_sweep_dwell_time_is_the_wait_at_each_point(station, tmp_path):
+    """dwell_time is the wait after the initial ramp and after every step."""
+    proc = TemperatureSweep(
+        station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
+        **{**FAST_TEMP, **DC, "dwell_time": 12.0},
+    )
+    assert proc.initiate().wait_s == pytest.approx(12.0)
+    step = proc.change_sweep_step()
+    assert step is not None and step.wait_s == pytest.approx(12.0)
+    proc.standby()
+
+
+def test_temp_sweep_enabled_sample_channel_without_vi_is_refused(tmp_path):
+    """Switching the sample channel ON on a station without it fails at construction."""
+    from cryosoft.core.exceptions import CryoSoftConfigError
+
     station = _partial_station("magnet_z", "temperature_vti", "dc_measurement")
     with pytest.raises(CryoSoftConfigError, match="temperature_sample"):
-        FieldSweep(
+        TemperatureSweep(
             station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
-            **{**FAST_FIELD, **DC, "set_sample_temperature": True},
+            **{**FAST_TEMP, **DC, "set_sample_temperature": True},
         )
 

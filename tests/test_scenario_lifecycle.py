@@ -60,7 +60,7 @@ TEMPERATURE_SWEEP_PARAMS: dict[str, Any] = {
     "temperature_end": 300.0,
     "temperature_steps": 3,
     "ramp_rate_K_per_min": 6000.0,
-    "point_wait": 0.0,
+    "dwell_time": 0.0,
     "current_A": 1e-6,
     "compliance_A": 1e-3,
     "voltmeter_range_V": 0.1,

@@ -22,20 +22,25 @@ class TemperatureSweep(SweepMeasureProcedure):
     no new code.
 
     Procedure flow:
-    1. ``initiate()``: ramp ``temperature_vti`` to the first temperature at
-       ``ramp_rate_K_per_min``, ramp any present magnets to their held fields,
-       arm the selected measurement VI.
+    1. ``initiate()``: ramp ``temperature_vti`` (and, when enabled,
+       ``temperature_sample``) to the first temperature at
+       ``ramp_rate_K_per_min``, ramp ``magnet_z`` to its held field, arm the
+       selected measurement VI.
     2. ``measure()``: read the VI, tag on the temperature read-back, save.
-    3. ``change_sweep_step()``: ramp ``temperature_vti`` to the next step.
+    3. ``change_sweep_step()``: ramp both temperature channels to the next step.
     4. ``standby()``: close the data file; temperature holds at the last point.
 
-    The ramp rate is passed per-step via the temperature ``Target``, so it takes
-    effect immediately at each step without a YAML config change.
+    The sample stage follows the sweep: its setpoint at every point is the swept
+    temperature plus ``sample_offset``. The ramp rate is passed per-step via
+    each temperature ``Target``, so it takes effect immediately at each step
+    without a YAML config change. After each point settles the procedure waits
+    ``dwell_time`` seconds before measuring.
 
     Required VIs in Station:
         ``temperature_vti`` (system) and at least one measurement VI.
-        ``magnet_z`` / ``magnet_y`` are optional — used when present; a nonzero
-        field on a missing magnet is refused at construction.
+        ``magnet_z`` is optional — used when present; a nonzero field on a
+        missing magnet is refused at construction. ``temperature_sample`` is
+        required only when ``set_sample_temperature`` is on.
     """
 
     name = "Temperature Sweep"
@@ -59,17 +64,11 @@ class TemperatureSweep(SweepMeasureProcedure):
             unit="T",
             description="Applied field (magnet Z, held constant)",
         ),
-        "field_y": ParamSpec(
-            type=float,
-            default=0.0,
-            unit="T",
-            description="Applied field (magnet Y, held constant)",
-        ),
         "ramp_rate_K_per_min": ParamSpec(
             type=float,
             default=2.0,
             unit="K/min",
-            description="Temperature ramp rate between steps",
+            description="Sweep rate: ramp rate of the VTI and sample stage between steps",
         ),
         "set_vti_temperature": ParamSpec(
             type=bool,
@@ -82,55 +81,58 @@ class TemperatureSweep(SweepMeasureProcedure):
         "set_sample_temperature": ParamSpec(
             type=bool,
             default=False,
-            description="Hold the sample-stage temperature during this run",
+            description=(
+                "Also control the sample-stage temperature, following the sweep "
+                "at 'sample_offset' from the swept temperature"
+            ),
         ),
-        "sample_temperature": ParamSpec(
+        "sample_offset": ParamSpec(
             type=float,
-            default=10.0,
+            default=0.0,
             unit="K",
             description=(
-                "Sample-stage temperature setpoint, held constant "
+                "Sample setpoint minus swept temperature "
                 "(ignored when 'set_sample_temperature' is off)"
             ),
         ),
-        "point_wait": ParamSpec(
+        "dwell_time": ParamSpec(
             type=float,
             default=60.0,
             unit="s",
-            description="Wait after reaching each temperature (thermal equilibration)",
+            description="Dwell: how long to wait at each temperature before measuring",
         ),
     }
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
-        """Resolve the measurement VI, then validate the magnet configuration.
+        """Resolve the measurement VI, then validate the magnet and temperature channels.
 
-        The applied fields are optional: a station without ``magnet_z`` /
-        ``magnet_y`` can still run this sweep at zero field. But a NONZERO field
-        requested on a missing magnet is refused here, at construction — silently
-        measuring at 0 T while the metadata claims 0.5 T would corrupt a dataset
-        without anyone noticing.
+        The applied field is optional: a station without ``magnet_z`` can still
+        run this sweep at zero field. But a NONZERO field requested on a missing
+        magnet is refused here, at construction — silently measuring at 0 T
+        while the metadata claims 0.5 T would corrupt a dataset without anyone
+        noticing.
 
         Raises:
-            CryoSoftConfigError: If a nonzero field is requested on a magnet the
-                station does not have (or, via the base class, if the station has
-                no measurement VI or a parameter collision occurs).
+            CryoSoftConfigError: If a nonzero field is requested on a station
+                without ``magnet_z``, if an enabled temperature channel has no
+                VI (or, via the base class, if the station has no measurement VI
+                or a parameter collision occurs).
         """
         super().__init__(*args, **kwargs)
         self._magnet_targets: dict[str, Target] = {}
-        for magnet, param in (("magnet_z", "field_z"), ("magnet_y", "field_y")):
-            field = float(self._params[param])
-            if self._station.has_vi(magnet):
-                self._magnet_targets[magnet] = Target(field)
-            elif field != 0.0:
-                raise CryoSoftConfigError(
-                    f"{param}={field} T requested, but this station has no "
-                    f"'{magnet}' VI. Set {param} to 0 or configure the magnet."
-                )
-            else:
-                logger.info(
-                    "TemperatureSweep: station has no '%s' — running without it "
-                    "(%s=0).", magnet, param,
-                )
+        field = float(self._params["field_z"])
+        if self._station.has_vi("magnet_z"):
+            self._magnet_targets["magnet_z"] = Target(field)
+        elif field != 0.0:
+            raise CryoSoftConfigError(
+                f"field_z={field} T requested, but this station has no "
+                f"'magnet_z' VI. Set field_z to 0 or configure the magnet."
+            )
+        else:
+            logger.info(
+                "TemperatureSweep: station has no 'magnet_z' — running without it "
+                "(field_z=0)."
+            )
         for toggle, vi_name in (
             ("set_vti_temperature", "temperature_vti"),
             ("set_sample_temperature", "temperature_sample"),
@@ -141,45 +143,39 @@ class TemperatureSweep(SweepMeasureProcedure):
                     f"Switch {toggle} off, or configure that controller."
                 )
 
-    def _temp_target(self, index: int) -> Target:
-        """Build the ``temperature_vti`` ``Target`` at *index* (with ramp rate)."""
-        return Target(
-            self._sweep[index],
-            rate=self._params["ramp_rate_K_per_min"],
-        )
-
     # ------------------------------------------------------------------
     # Axis-specific hooks (SweepMeasureProcedure owns the four-method loop)
     # ------------------------------------------------------------------
 
     def _sweep_targets(self, index: int) -> dict[str, Target]:
-        """Build the swept-channel target at *index*, honouring its on/off toggle.
+        """Build the temperature targets at *index*, honouring the on/off toggles.
 
-        With ``set_vti_temperature`` off the dict is empty: the Orchestrator
-        never ramps the VTI, and the sweep walks its points measuring whatever
-        temperature the cryostat happens to be at (the read-back still records
-        the true value). Monitoring is unaffected either way.
+        The VTI goes to the swept value; the sample stage, when enabled, goes to
+        the swept value plus ``sample_offset``. Both carry the sweep rate. With
+        both toggles off the dict is empty: the Orchestrator never ramps either
+        controller and the sweep measures whatever temperature the cryostat
+        happens to be at (the read-back still records the true value).
         """
-        if not self._params["set_vti_temperature"]:
-            return {}
-        return {"temperature_vti": self._temp_target(index)}
-
-    def _initial_system_targets(self) -> dict[str, Target]:
-        """Ramp the enabled temperature channels to their first values, plus magnets."""
-        targets = {
-            **self._sweep_targets(0),
-            **self._magnet_targets,  # only magnets the station actually has
-        }
+        value = self._sweep[index]
+        rate = self._params["ramp_rate_K_per_min"]
+        targets: dict[str, Target] = {}
+        if self._params["set_vti_temperature"]:
+            targets["temperature_vti"] = Target(value, rate=rate)
         if self._params["set_sample_temperature"]:
-            targets["temperature_sample"] = Target(self._params["sample_temperature"])
+            targets["temperature_sample"] = Target(
+                value + self._params["sample_offset"], rate=rate
+            )
         return targets
 
-    def _step_targets(self, index: int) -> dict[str, Target]:
-        """Ramp ``temperature_vti`` to the temperature at *index* (with rate).
+    def _initial_system_targets(self) -> dict[str, Target]:
+        """Ramp the enabled temperature channels to their first values, plus the magnet."""
+        return {
+            **self._sweep_targets(0),
+            **self._magnet_targets,  # only if the station has magnet_z
+        }
 
-        The sample stage is held at its fixed setpoint from ``initiate()`` and is
-        deliberately not re-sent each step.
-        """
+    def _step_targets(self, index: int) -> dict[str, Target]:
+        """Ramp the enabled temperature channels to the values at *index*."""
         return self._sweep_targets(index)
 
     def _standby_targets(self) -> dict[str, Target]:
@@ -191,9 +187,9 @@ class TemperatureSweep(SweepMeasureProcedure):
         return self._station.temperature_vti.temperature()
 
     def _initiate_wait_s(self) -> float:
-        """Settle time after the initial ramp (``point_wait``)."""
-        return float(self._params["point_wait"])
+        """Dwell after the initial ramp (``dwell_time``)."""
+        return float(self._params["dwell_time"])
 
     def _step_wait_s(self) -> float:
-        """Settle time after each temperature step (``point_wait``)."""
-        return float(self._params["point_wait"])
+        """Dwell at each temperature step (``dwell_time``)."""
+        return float(self._params["dwell_time"])

@@ -4531,3 +4531,37 @@ def test_repeated_card_swaps_retire_every_replaced_card(qtbot):
         assert all(sip.isdeleted(card) for card in retired)
     finally:
         orch.shutdown()
+
+
+# ── CSV sweep values popup ───────────────────────────────────────────────────
+
+def test_csv_values_dialog_lists_every_value_in_a_scrollable_list(qtbot, tmp_path):
+    """The popup shows one list row per value read from the CSV file."""
+    from PyQt6.QtWidgets import QLabel, QListWidget
+
+    from cryosoft.gui.sweep_axis_widget import CsvValuesDialog
+
+    path = tmp_path / "temps.csv"
+    path.write_text("\n".join(str(v) for v in range(10, 60)) + "\n", encoding="utf-8")
+    dialog = CsvValuesDialog(str(path), "K")
+    qtbot.addWidget(dialog)
+
+    values = dialog.findChild(QListWidget, "sweep_csv_values_list")
+    assert values.count() == 50
+    assert values.item(0).text() == "1:  10 K"
+    assert "50 values" in dialog.findChild(QLabel, "sweep_csv_values_summary").text()
+
+
+def test_csv_values_dialog_reports_an_unreadable_file_inline(qtbot, tmp_path):
+    """A bad file leaves the list empty and explains why in the dialog itself."""
+    from PyQt6.QtWidgets import QLabel, QListWidget
+
+    from cryosoft.gui.sweep_axis_widget import CsvValuesDialog
+
+    bad = tmp_path / "bad.csv"
+    bad.write_text("1.0\nabc\n", encoding="utf-8")
+    dialog = CsvValuesDialog(str(bad))
+    qtbot.addWidget(dialog)
+
+    assert dialog.findChild(QListWidget, "sweep_csv_values_list").count() == 0
+    assert "Cannot read values" in dialog.findChild(QLabel, "sweep_csv_values_summary").text()

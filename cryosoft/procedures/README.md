@@ -220,7 +220,7 @@ directly and implement the five lifecycle methods and its own `DataManager`;
 ## Known issues
 
 **Magnet and temperature VI names are hardcoded in the procedures.**
-`FieldSweep` and `TemperatureSweep` address `magnet_z`, `magnet_y`,
+`FieldSweep` and `TemperatureSweep` address `magnet_z`,
 `temperature_vti` and `temperature_sample` as literal strings, and
 `TimeSeries` does the same for the three channels its end condition can
 watch (`_END_CHANNELS`). A setup that
@@ -250,7 +250,7 @@ Each row: responsibility, key public class, and the test file(s) in `tests/`.
 | `__init__.py` | Package marker | (none) | none |
 | `field_sweep.py` | Sweeps magnetic field (`magnet_z`), optionally holding `temperature_vti` and/or `temperature_sample` (see Temperature channels below), running any selected measurement VI at each point; parks `magnet_z` at 0 T on standby. Requires `magnet_z`, at least one measurement VI, and a VI for each switched-on temperature channel. | `FieldSweep` (axis hooks over `SweepMeasureProcedure`) | `test_new_procedures.py`, `test_l4_procedure.py`, `test_field_voltage_procedure.py` |
 | `time_series.py` | Measures repeatedly against elapsed time, commanding no system hardware and claiming only the reading path, so the operator keeps manual control of the whole cryostat during the run. Ends on `max_duration_s`, or when a watched channel (`temperature_vti`, `temperature_sample`, `magnet_z`) reaches `end_value`. Requires at least one measurement VI; a watched channel's VI must exist. | `TimeSeries` (axis hooks + `axis_data_key`/`claimed_vi_names` over `SweepMeasureProcedure`) | `test_time_series_procedure.py`, `test_l3_orchestrator.py` (ramp scope) |
-| `temperature_sweep.py` | Sweeps temperature (`temperature_vti`) at a per-sweep ramp rate, optionally holding `temperature_sample` and optional `magnet_z` / `magnet_y` fields, running any selected measurement VI at each stable point. Requires at least one measurement VI; magnets optional (skipped at 0, refused at nonzero when absent). | `TemperatureSweep` (axis hooks over `SweepMeasureProcedure`) | `test_new_procedures.py` |
+| `temperature_sweep.py` | Sweeps temperature (`temperature_vti`) at a per-sweep ramp rate, optionally driving `temperature_sample` along with it at a fixed `sample_offset`, holding an optional `magnet_z` field, and dwelling `dwell_time` seconds at each point before running any selected measurement VI. Requires at least one measurement VI; `magnet_z` optional (skipped at 0, refused at nonzero when absent). | `TemperatureSweep` (axis hooks over `SweepMeasureProcedure`) | `test_new_procedures.py` |
 
 ### Temperature channels (on/off)
 
@@ -260,7 +260,7 @@ gated by a bool parameter:
 | Parameter | Default | Effect when on |
 |---|---|---|
 | `set_vti_temperature` | `True` | Emits a `temperature_vti` target — the fixed `temperature` in `FieldSweep`, the swept value in `TemperatureSweep` |
-| `set_sample_temperature` | `False` | Emits a `temperature_sample` target at `sample_temperature`, set once in `initiate()` and held |
+| `set_sample_temperature` | `False` | Emits a `temperature_sample` target — the fixed `sample_temperature` in `FieldSweep`; in `TemperatureSweep` the swept value plus `sample_offset`, re-sent at every step with the sweep rate |
 
 "Off" means the procedure emits **no `Target`** for that VI, so the Orchestrator
 never calls `start_ramp` on it and the controller holds exactly where the operator
