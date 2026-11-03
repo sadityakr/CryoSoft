@@ -147,6 +147,42 @@ per-plot Loop 1 / Loop 2 selectors (fed by `live_plot_loop_labels()`, items
 like "A1 = Mux-Ch1" with the axis index as item data); axis keys stay the
 plain column names and the panel indexes directly into the grid at draw time.
 
+**Route settings.** With the switch's route in a slot, the Reading loop group
+also offers a `route_settings` checkbox when the measurement VI declares
+`route_parameters`. Ticked, a "Route settings" column shows one
+`route_<route>__<param>` field per picked route (e.g. current, range,
+compliance for DC mode; a parameter already in a slot is left out), and the
+run-wide fields it replaces leave the Measurement column. The first route's
+values arm the VI; at each later route change whose values differ the
+source is switched off (`standby`), the route selected, and the VI re-armed
+with that route's values — unless the VI declares a `route_setter` (SS DC
+mode), in which case the route is selected and that setter applies the
+route's values with the source left on. Values are validated, including against the
+setup's control limits, when the run is built. The resolved table is stored
+as `procedure_params["route_settings_values"]`. See GLOSSARY.md's
+**Route settings**.
+
+At a normal run end `standby()` dispatches the measurement VI's
+`run_end_method` (`standby` by default; SS DC mode's `disarm` leaves the
+current on); `abort()` always dispatches `standby`. See GLOSSARY.md's
+**Run end method**.
+
+Each selected slot also gets a `{slot}_wait_s` field (seconds, default 0) right
+under its drop-down: the settle time between that parameter's measurements —
+after every change of its value, before the reading is taken. Only a looping
+slot waits (a static one is set once at `initiate()`). When both slots change
+at once (the first reading of an outer row) their waits add. The wait never
+blocks the tick: `measure()` keeps an in-flight grid cursor and returns while
+`measure_pending` is True and the Orchestrator stays in MEASURING. The wait is
+exact, not rounded up to the tick: a one-shot precise timer calls `measure()`
+again at the deadline (`measure_resume_in_s`), and a tick that fires during a
+wait is skipped (no monitor update) unless more than one tick period of the
+wait would still be left, so the monitor may be up to a tick old during a wait.
+The datapoint is only announced and the sweep only advanced when the grid
+completes. A pause requested meanwhile takes effect at the next datapoint
+boundary. Probes cap the waits at `max_wait_s`; the duration
+estimate counts them.
+
 ### Time series: an axis that is not a setpoint, and a run that commands nothing
 
 `time_series.py` is the third shape a procedure can take, and the most
@@ -241,6 +277,23 @@ The same applies to the temperature on/off toggles below: both procedures
 declare them independently, so a third procedure wanting them must repeat the
 declaration. Both are the same underlying gap and should be fixed together.
 
+**TODO: no settle wait after a reading-loop value changes.** `measure()` in
+`SweepMeasureProcedure` dispatches a loop slot's setter and immediately calls
+`take_reading()`; the procedure adds no pause. What each loopable parameter
+does today:
+
+| Loop parameter | Setter | Wait today |
+|---|---|---|
+| Switch `route` | `SwitchMatrixVI.select_route` | `time.sleep(settle_time_s)` from the VI's config (`12t-cryo`: 1.0 s, `sim_cryostat`: 0.0 s). Already handled, but fixed per setup, not per run |
+| DC-mode `current` / `current_A` | `set_dc_current`, `set_source_current` | None — reprograms the source and returns; the first reading can include the source's settling |
+| Delta-mode `current` | `set_delta_current` | None — stops and re-arms the delta engine, so the first readings include the start-up transient (the docstring tells callers to raise `n_readings`) |
+
+Intended fix: a per-run `loop_settle_time` (s) parameter on
+`SweepMeasureProcedure`, applied after each loop-value dispatch and before the
+reading, so it covers every loopable parameter uniformly instead of each VI
+growing its own sleep. It must be declared with unit `"s"` so the probe-run wait
+cap picks it up, and counted in the per-point cost estimate.
+
 ## Files
 
 Each row: responsibility, key public class, and the test file(s) in `tests/`.
@@ -250,7 +303,7 @@ Each row: responsibility, key public class, and the test file(s) in `tests/`.
 | `__init__.py` | Package marker | (none) | none |
 | `field_sweep.py` | Sweeps magnetic field (`magnet_z`), optionally holding `temperature_vti` and/or `temperature_sample` (see Temperature channels below), running any selected measurement VI at each point; parks `magnet_z` at 0 T on standby. Requires `magnet_z`, at least one measurement VI, and a VI for each switched-on temperature channel. | `FieldSweep` (axis hooks over `SweepMeasureProcedure`) | `test_new_procedures.py`, `test_l4_procedure.py`, `test_field_voltage_procedure.py` |
 | `time_series.py` | Measures repeatedly against elapsed time, commanding no system hardware and claiming only the reading path, so the operator keeps manual control of the whole cryostat during the run. Ends on `max_duration_s`, or when a watched channel (`temperature_vti`, `temperature_sample`, `magnet_z`) reaches `end_value`. Requires at least one measurement VI; a watched channel's VI must exist. | `TimeSeries` (axis hooks + `axis_data_key`/`claimed_vi_names` over `SweepMeasureProcedure`) | `test_time_series_procedure.py`, `test_l3_orchestrator.py` (ramp scope) |
-| `temperature_sweep.py` | Sweeps temperature (`temperature_vti`) at a per-sweep ramp rate, optionally driving `temperature_sample` along with it at a fixed `sample_offset`, holding an optional `magnet_z` field, and dwelling `dwell_time` seconds at each point before running any selected measurement VI. Requires at least one measurement VI; `magnet_z` optional (skipped at 0, refused at nonzero when absent). | `TemperatureSweep` (axis hooks over `SweepMeasureProcedure`) | `test_new_procedures.py` |
+| `temperature_sweep.py` | Sweeps temperature (`temperature_vti`) at a per-sweep ramp rate, sweeping the sample temperature (`temperature_sample`, the recorded axis) with the VTI held `vti_offset` below it, holding an optional `magnet_z` field, and dwelling `dwell_time` seconds at each point before running any selected measurement VI. Requires at least one measurement VI; `magnet_z` optional (skipped at 0, refused at nonzero when absent). | `TemperatureSweep` (axis hooks over `SweepMeasureProcedure`) | `test_new_procedures.py` |
 
 ### Temperature channels (on/off)
 
@@ -259,8 +312,8 @@ gated by a bool parameter:
 
 | Parameter | Default | Effect when on |
 |---|---|---|
-| `set_vti_temperature` | `True` | Emits a `temperature_vti` target — the fixed `temperature` in `FieldSweep`, the swept value in `TemperatureSweep` |
-| `set_sample_temperature` | `False` | Emits a `temperature_sample` target — the fixed `sample_temperature` in `FieldSweep`; in `TemperatureSweep` the swept value plus `sample_offset`, re-sent at every step with the sweep rate |
+| `set_vti_temperature` | `True` | Emits a `temperature_vti` target — the fixed `temperature` in `FieldSweep`; in `TemperatureSweep` the swept sample temperature minus `vti_offset`, re-sent at every step with the sweep rate |
+| `set_sample_temperature` | `False` | Emits a `temperature_sample` target — the fixed `sample_temperature` in `FieldSweep`; in `TemperatureSweep` the swept value itself (the sample is the swept axis), re-sent at every step with the sweep rate |
 
 "Off" means the procedure emits **no `Target`** for that VI, so the Orchestrator
 never calls `start_ramp` on it and the controller holds exactly where the operator

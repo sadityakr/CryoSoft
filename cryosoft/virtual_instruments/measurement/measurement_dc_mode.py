@@ -18,6 +18,10 @@ from cryosoft.virtual_instruments.base import (
 # Sentinel to detect the un-armed state.
 _NOT_INITIATED = object()
 
+# The voltmeter_range_V value meaning "autorange". A 0 V full scale is not a
+# range the 2182A has, so the sentinel can never shadow a real choice.
+AUTO_RANGE_V = 0.0
+
 logger = logging.getLogger(__name__)
 
 
@@ -54,6 +58,12 @@ class DCModeMeasurementVI(MeasurementInstrumentBase):
 
     # Reading-loop declaration: the DC current. Can be changed in-place cheaply.
     reading_setters: ClassVar[dict[str, str]] = {"current": "set_dc_current"}
+
+    # Route settings declaration (see MeasurementInstrumentBase): each switch
+    # route may be armed with its own excitation, range and compliance.
+    route_parameters: ClassVar[tuple[str, ...]] = (
+        "current", "voltmeter_range_V", "compliance_V"
+    )
 
     # Control-validation standard (see BaseVirtualInstrument): both ways of
     # commanding the excitation current — arming it and reprogramming it
@@ -94,8 +104,9 @@ class DCModeMeasurementVI(MeasurementInstrumentBase):
                 "1 V": 1.0,
                 "10 V": 10.0,
                 "100 V": 100.0,
+                "Auto": AUTO_RANGE_V,
             },
-            description="Keithley 2182A voltmeter measurement range",
+            description="Keithley 2182A voltmeter measurement range (Auto: autorange)",
         ),
         "compliance_V": ParamSpec(
             type=float,
@@ -188,7 +199,8 @@ class DCModeMeasurementVI(MeasurementInstrumentBase):
         Args:
             current: DC source current in Amperes.
             n_readings: Readings per ``take_reading()`` acquisition.
-            voltmeter_range_V: Voltmeter measurement range in Volts.
+            voltmeter_range_V: Voltmeter measurement range in Volts, or
+                ``AUTO_RANGE_V`` (0.0) for autorange.
             compliance_V: Source voltage compliance limit in Volts.
             delay_s: Inter-reading delay in seconds.
             compliance_abort: Abort the run if the source hits compliance.
@@ -230,15 +242,31 @@ class DCModeMeasurementVI(MeasurementInstrumentBase):
         # discipline" defense-in-depth already applied to
         # stop_delta_mode()/set_current() elsewhere in the K6221 driver: never
         # assume the instrument is idle, always force it.
-        source.set_current(0.0)
+        source.set_current(self._arming_baseline_current())
         source.set_compliance(self._compliance_V)
         # Pin the voltmeter single-shot so each READ? is one fresh triggered
         # conversion. The 2182A ships free-running and the driver used to
         # force this from its own __init__; under the connection-lifecycle
         # standard that is a setup command, so it belongs on the arming path.
         meter.set_continuous_initiation(False)
-        meter.set_range(self._voltmeter_range_V)
+        if self._voltmeter_range_V == AUTO_RANGE_V:
+            meter.set_auto_range(True)
+        else:
+            meter.set_range(self._voltmeter_range_V)
         source.set_current(self._current)
+
+    def _arming_baseline_current(self) -> float:
+        """Return the current written before compliance on the arming path.
+
+        That write (``set_current()`` aborts any armed sweep/delta engine) is
+        what makes the arming path safe on a shared 6221; DC mode writes 0 A,
+        so every arm starts from the source idle. A method that must keep its
+        excitation flowing through a re-arm overrides this.
+
+        Returns:
+            The baseline current in Amperes (0.0 here).
+        """
+        return 0.0
 
     # ------------------------------------------------------------------
     # @control — the reading-loop setter

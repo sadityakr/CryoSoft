@@ -170,7 +170,8 @@ def test_station_measurement_vi_names_registration_order(sim_station: Station):
     excluded.
     """
     assert sim_station.measurement_vi_names() == [
-        "keithley_delta_mode", "keithley_dc_mode", "dc_measurement", "lockin_harmonic",
+        "keithley_delta_mode", "keithley_dc_mode", "keithley_ss_dc_mode",
+        "dc_measurement", "lockin_harmonic",
     ]
 
 

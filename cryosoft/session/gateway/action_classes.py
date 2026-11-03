@@ -311,6 +311,11 @@ CONTROL_ACTION_CLASSES: dict[tuple[str, str], ClassifiedAction] = {
         ActionClass.RUN_CONTROL,
         "As set_dc_current, for a separate source/voltmeter pair.",
     ),
+    ("measurement", "apply_route_settings"): ClassifiedAction(
+        ActionClass.RUN_CONTROL,
+        "Sets the armed instrument's current, voltmeter range and compliance "
+        "for one switch route, the current left on (spin Seebeck DC mode).",
+    ),
     # ── rotator: sample rotation stages ──
     ("rotator", "set_sample_angle"): ClassifiedAction(
         ActionClass.RUN_CONTROL,

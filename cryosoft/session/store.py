@@ -75,6 +75,89 @@ def _read_json(path: Path) -> object | None:
         return None
 
 
+_MAX_NESTING = 6
+
+
+def _marked_dirs(root: Path, marker: str, max_depth: int = _MAX_NESTING) -> list[Path]:
+    """Return every folder under ``root`` holding ``marker``, as relative paths.
+
+    The one walk behind both tiers' listings, so a session or experiment may
+    sit in sub-folders of its parent. A folder holding the marker is a leaf of
+    the walk: its own contents (data, analysis, experiments) are never searched.
+    Sub-folders are visited in sorted order; hidden folders are skipped.
+
+    Args:
+        root: Folder to search; need not exist.
+        marker: File name that makes a folder a session or an experiment.
+        max_depth: Deepest nesting searched, in path segments below ``root``.
+
+    Returns:
+        Relative folder paths, sorted; ``[]`` when ``root`` is not a directory.
+    """
+    if not root.is_dir():
+        return []
+    found: list[Path] = []
+
+    def _walk(folder: Path, depth: int) -> None:
+        try:
+            children = sorted(p for p in folder.iterdir() if p.is_dir())
+        except OSError:
+            return
+        for child in children:
+            if child.name.startswith("."):
+                continue
+            if (child / marker).is_file():
+                found.append(child.relative_to(root))
+            elif depth < max_depth:
+                _walk(child, depth + 1)
+
+    _walk(root, 1)
+    return sorted(found)
+
+
+def normalize_relative_path(text: str, root: Path, what: str) -> str:
+    """Turn operator-typed text into a POSIX path relative to ``root``, or raise.
+
+    Both separators are accepted and normalised on every platform; an absolute
+    path is accepted when it lies inside ``root``. Nothing may leave ``root``.
+
+    Args:
+        text: What the operator typed (relative, or absolute inside ``root``).
+        root: The folder the result must stay inside.
+        what: ``"Session"`` or ``"Experiment"``, for the refusal messages.
+
+    Returns:
+        The normalised relative path, e.g. ``"2026/spring/rvst"``.
+
+    Raises:
+        ValueError: If the text is empty, leaves ``root`` (``..``, another
+            drive, an absolute path outside it) or names ``root`` itself.
+    """
+    candidate = text.strip()
+    if not candidate:
+        raise ValueError(f"{what} folder must not be empty")
+    normalized = candidate.replace("\\", "/")
+    if re.match(r"^([A-Za-z]:)?/", normalized) or re.match(r"^[A-Za-z]:", normalized):
+        try:
+            normalized = (
+                Path(candidate).resolve().relative_to(root.resolve()).as_posix()
+            )
+        except (OSError, ValueError):
+            raise ValueError(
+                f"{what} folder {text!r} is outside {root} - it must be inside it"
+            ) from None
+    parts = [part.strip() for part in normalized.split("/") if part.strip()]
+    if not parts or parts == ["."]:
+        raise ValueError(f"{what} folder {text!r} names {root} itself, not a folder in it")
+    if any(part in (".", "..") for part in parts):
+        raise ValueError(f"{what} folder {text!r} must not contain '.' or '..'")
+    if any(re.search(r'[<>:"|?*]', part) for part in parts):
+        raise ValueError(f"{what} folder {text!r} contains a character a folder name cannot have")
+    if len(parts) > _MAX_NESTING:
+        raise ValueError(f"{what} folder {text!r} is nested deeper than {_MAX_NESTING} levels")
+    return "/".join(parts)
+
+
 class ExperimentStore:
     """One-folder-per-experiment store rooted inside the data directory.
 
@@ -139,14 +222,15 @@ class ExperimentStore:
         return candidate
 
     def list_experiments(self) -> list[str]:
-        """Return every stored experiment id (sorted; [] when none/no root)."""
-        if not self._root.is_dir():
-            return []
-        return sorted(
-            entry.name
-            for entry in self._root.iterdir()
-            if entry.is_dir() and (entry / _EXPERIMENT_FILENAME).is_file()
-        )
+        """Return every stored experiment id (sorted; [] when none/no root).
+
+        An experiment may sit in sub-folders of the session, so an id is the
+        folder's POSIX path relative to the root (``"batch1/rvst"``); a flat
+        experiment's id is just its folder name.
+        """
+        return [
+            path.as_posix() for path in _marked_dirs(self._root, _EXPERIMENT_FILENAME)
+        ]
 
     def load(self, experiment_id: str) -> ExperimentRecord | None:
         """Load one experiment record, tolerating a corrupt file.
@@ -462,44 +546,80 @@ class SessionStore:
             counter += 1
         return candidate
 
+    def _session_id_for(self, owner: str, relative: Path) -> str:
+        """Return the store key of the session folder at ``relative``.
+
+        A folder directly under its owner's own folder keeps its bare name as
+        its key (``<owner>/<name>`` -> ``name``); any other location - nested
+        deeper, or outside the owner's folder - is keyed by its path relative
+        to the store root. ``session_dir()`` is the inverse.
+
+        Args:
+            owner: Roster key of the session's owner.
+            relative: The session folder, relative to the store root.
+
+        Returns:
+            The session id.
+        """
+        parts = relative.parts
+        if len(parts) == 2 and parts[0] == owner:
+            return parts[1]
+        return relative.as_posix()
+
+    def _owner_of(self, relative: Path) -> str:
+        """Return who owns the session folder at ``relative`` (its ``session.json``).
+
+        Falls back to the first path segment - the owner's folder in the
+        original layout - when the record cannot be read.
+
+        Args:
+            relative: The session folder, relative to the store root.
+
+        Returns:
+            The owner's roster key, or ``""`` when it cannot be told.
+        """
+        data = _read_json(self._root / relative / _SESSION_FILENAME)
+        if isinstance(data, dict):
+            owner = data.get("user_id")
+            if isinstance(owner, str) and owner:
+                return owner
+        return relative.parts[0] if len(relative.parts) > 1 else ""
+
     def list_all_sessions(self) -> list[tuple[str, str]]:
         """Return every session in the store as ``(user_id, session_id)`` pairs.
 
         What the Load Session dialog lists: any user's session, not only the
         logged-in user's, since loading one is how work is picked up across
-        owners. Sorted by user then session id; a user folder without a
-        ``session.json`` inside any child contributes nothing.
+        owners. Sessions are found wherever they sit under the root, however
+        deeply nested; the owner is the one named in ``session.json``.
 
         Returns:
-            Every ``(user_id, session_id)`` pair; ``[]`` when the store root
-            does not exist.
+            Every ``(user_id, session_id)`` pair, sorted; ``[]`` when the
+            store root does not exist.
         """
-        if not self._root.is_dir():
-            return []
         found: list[tuple[str, str]] = []
-        for user_dir in sorted(p for p in self._root.iterdir() if p.is_dir()):
-            for session_id in self.list_sessions(user_dir.name):
-                found.append((user_dir.name, session_id))
-        return found
+        for relative in _marked_dirs(self._root, _SESSION_FILENAME):
+            owner = self._owner_of(relative)
+            if owner:
+                found.append((owner, self._session_id_for(owner, relative)))
+        return sorted(found)
 
     def locate(self, path: str | Path) -> tuple[str, str] | None:
         """Resolve a ``session.json`` (or its folder) to ``(user_id, session_id)``.
 
         The Browse half of Load Session: the operator points at a file on
-        disk and this says which session of this store it is. The store's
-        layout is structural — ``<root>/<user_id>/<session_id>/session.json``
-        — so the answer is read from the path, never from the file's own
-        ``user_id`` field, and a session outside this store's root is
-        refused (``None``) rather than adopted: every consumer roots its
-        ``ExperimentStore`` from ``session_dir()``, so an outside folder
-        could be listed but never written to coherently.
+        disk and this says which session of this store it is. The owner is
+        read from the record, the key from where the folder sits; a session
+        outside this store's root is refused (``None``) rather than adopted,
+        because every consumer roots its ``ExperimentStore`` from
+        ``session_dir()``.
 
         Args:
             path: A ``session.json`` file, or the session folder holding one.
 
         Returns:
             ``(user_id, session_id)``, or ``None`` when the path is not a
-            loadable session directly inside this store's root.
+            loadable session inside this store's root.
         """
         candidate = Path(path)
         if candidate.name == _SESSION_FILENAME:
@@ -508,66 +628,96 @@ class SessionStore:
             relative = candidate.resolve().relative_to(self._root.resolve())
         except (OSError, ValueError):
             return None
-        if len(relative.parts) != 2:
+        if not relative.parts:
             return None
-        user_id, session_id = relative.parts
-        if self.load(user_id, session_id) is None:
+        owner = self._owner_of(relative)
+        if not owner:
             return None
-        return user_id, session_id
+        session_id = self._session_id_for(owner, relative)
+        if self.load(owner, session_id) is None:
+            return None
+        return owner, session_id
 
     def list_sessions(self, user_id: str) -> list[str]:
         """Return every session id owned by ``user_id`` (sorted; [] when none).
-
-        Ownership is structural (a directory, ``<root>/<user_id>/``), so
-        this is a cheap directory listing — no need to open every
-        ``session.json`` to filter, unlike the flat, unnested layout this
-        replaced.
 
         Args:
             user_id: Roster key whose sessions to list.
 
         Returns:
-            Sorted session ids owned by ``user_id``.
+            Sorted session ids owned by ``user_id``, wherever they sit under
+            the store root.
         """
-        user_dir = self._root / user_id
-        if not user_dir.is_dir():
-            return []
         return sorted(
-            entry.name
-            for entry in user_dir.iterdir()
-            if entry.is_dir() and (entry / _SESSION_FILENAME).is_file()
+            sid for owner, sid in self.list_all_sessions() if owner == user_id
         )
 
     def session_dir(self, user_id: str, session_id: str) -> Path:
         """Return the folder one session owns, whether or not it exists yet.
 
-        The single source of truth for the Session tier's layout
-        (``<root>/<user_id>/<session_id>``), so a caller that has to root an
-        ``ExperimentStore`` inside a session — ``cryosoft.main`` at launch,
-        ``ExperimentManager.rebind_session()`` on a live switch — never
-        rebuilds that path by hand and cannot drift from ``load``/``save``.
+        The single source of truth for the Session tier's layout, so a caller
+        that has to root an ``ExperimentStore`` inside a session never
+        rebuilds that path by hand. A bare ``session_id`` is a folder directly
+        under the owner's (``<root>/<user_id>/<session_id>``); an id holding
+        ``/`` is a path relative to the store root.
 
         Args:
-            user_id: Roster key of the owner (the session's first path
-                segment).
-            session_id: The store key (the session's own folder name).
+            user_id: Roster key of the owner.
+            session_id: The store key.
 
         Returns:
             The session folder path. Pure: nothing is created or checked.
         """
+        if "/" in session_id:
+            return self._root / session_id
         return self._root / user_id / session_id
+
+    def default_session_path(self, user_id: str, name: str) -> str:
+        """Return the root-relative folder a new session of this name would get.
+
+        Args:
+            user_id: Owner of the new session.
+            name: Its display name.
+
+        Returns:
+            ``"<user_id>/<YYYYMMDD_slug>"``, store-unique for the owner.
+        """
+        return f"{user_id}/{self.make_session_id(name, _utc_now_iso(), user_id)}"
+
+    def validate_session_path(self, text: str, user_id: str) -> str:
+        """Return *text* as the store key of a new session folder, or raise.
+
+        The location is free anywhere under the store root. It must not be
+        the root, hold a session already, or sit inside one (a session's
+        folder is its experiments').
+
+        Args:
+            text: Path relative to the store root, or absolute inside it.
+            user_id: Roster key of the intended owner.
+
+        Returns:
+            The session id (see ``session_dir``).
+
+        Raises:
+            ValueError: If the path is empty, leaves the root, is taken, or is
+                inside an existing session.
+        """
+        relative = normalize_relative_path(text, self._root, "Session")
+        parts = relative.split("/")
+        for depth in range(1, len(parts) + 1):
+            if (self._root.joinpath(*parts[:depth]) / _SESSION_FILENAME).is_file():
+                where = "/".join(parts[:depth])
+                if depth == len(parts):
+                    raise ValueError(f"A session already exists in {where!r}")
+                raise ValueError(f"{relative!r} is inside the session {where!r}")
+        return self._session_id_for(user_id, Path(relative))
 
     def validate_session_dirname(self, dirname: str, user_id: str) -> str:
         """Return *dirname* as a usable session folder name, or raise.
 
-        The Session tier's half of the folder-name rule
-        ``ExperimentManager._resolve_experiment_id()`` applies one level
-        down, and for the same reasons: a session names ONE folder directly
-        under its owner, never a nested path, and never an existing one.
-        Both separators are rejected on every platform rather than via
-        ``os.sep``/``os.altsep`` — a session folder written on Linux is
-        routinely opened on a Windows analysis machine, where a backslash
-        would split into a nested path.
+        The flat form: ONE folder directly under its owner, never a nested
+        path, and never an existing one. ``validate_session_path`` is the
+        free-location form the Resume Session dialog uses.
 
         Args:
             dirname: The folder name the operator chose (whitespace is
@@ -589,8 +739,7 @@ class SessionStore:
         if "/" in candidate or "\\" in candidate:
             raise ValueError(
                 f"Session folder name {dirname!r} must not contain a path "
-                "separator — it names a single folder directly under the "
-                "owner, not a nested path"
+                "separator - it names a single folder directly under the owner"
             )
         if candidate in (".", ".."):
             raise ValueError(f"Session folder name {dirname!r} is not allowed")
@@ -601,34 +750,38 @@ class SessionStore:
         return candidate
 
     def create_session(
-        self, name: str, user_id: str, session_dirname: str | None = None
+        self,
+        name: str,
+        user_id: str,
+        session_dirname: str | None = None,
+        session_path: str | None = None,
     ) -> Session:
         """Create, save, and return a new ``Session`` owned by ``user_id``.
 
         Args:
             name: The session's display name.
             user_id: Roster key of the owner.
-            session_dirname: Optional override for the session's folder name
-                (and therefore its ``session_id``), directly under
-                ``<root>/<user_id>/`` — flat only, no nesting. ``None`` (the
-                default) falls back to the derived
-                ``make_session_id(name, created, user_id)``. The operator
-                picks this in the Resume Session dialog, which is why the
-                folder a session owns is chosen rather than only derived.
+            session_dirname: Optional flat folder name directly under
+                ``<root>/<user_id>/`` (see ``validate_session_dirname``).
+            session_path: Optional free location anywhere under the store
+                root (see ``validate_session_path``). Wins over
+                ``session_dirname``. With neither, the folder is derived from
+                the name.
 
         Returns:
             The newly created, already-saved ``Session``.
 
         Raises:
-            ValueError: If ``session_dirname`` is given but invalid (see
-                ``validate_session_dirname``).
+            ValueError: If the chosen folder is invalid.
             OSError: If the file cannot be written.
         """
         created = _utc_now_iso()
-        if session_dirname is None:
-            session_id = self.make_session_id(name, created, user_id)
-        else:
+        if session_path is not None:
+            session_id = self.validate_session_path(session_path, user_id)
+        elif session_dirname is not None:
             session_id = self.validate_session_dirname(session_dirname, user_id)
+        else:
+            session_id = self.make_session_id(name, created, user_id)
         session = Session(
             session_id=session_id,
             user_id=user_id,
@@ -652,7 +805,7 @@ class SessionStore:
             ``schema_version`` is newer than this app's ``SCHEMA_VERSION``
             (logged at WARNING) — same contract as ``ExperimentStore.load``.
         """
-        data = _read_json(self._root / user_id / session_id / _SESSION_FILENAME)
+        data = _read_json(self.session_dir(user_id, session_id) / _SESSION_FILENAME)
         if data is None:
             return None
         session = Session.from_dict(data)
@@ -682,7 +835,7 @@ class SessionStore:
             raise ValueError("Session.user_id must be set before save()")
         if not session.session_id:
             raise ValueError("Session.session_id must be set before save()")
-        path = self._root / session.user_id / session.session_id / _SESSION_FILENAME
+        path = self.session_dir(session.user_id, session.session_id) / _SESSION_FILENAME
         _write_json_atomic(path, session.to_dict())
 
     def get_active(self) -> tuple[str, str] | None:

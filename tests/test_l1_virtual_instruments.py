@@ -1361,3 +1361,94 @@ def test_observe_lifecycle_state_failures_never_break_the_monitor_cycle():
         state = vi.get_state()
         assert state["reading"] == 1.0
         assert vi.lifecycle_state() == "initiated"
+
+
+def test_dc_mode_auto_range_arms_meter_autorange():
+    """voltmeter_range_V=AUTO_RANGE_V arms autorange; a fixed range clears it."""
+    from cryosoft.virtual_instruments.measurement.measurement_dc_mode import (
+        AUTO_RANGE_V,
+        DCModeMeasurementVI,
+    )
+
+    source = SimKeithley6221("SIM")
+    meter = SimKeithley2182A("SIM")
+    source._paired_meter = meter
+    vi = DCModeMeasurementVI({"source": source, "meter": meter})
+
+    assert AUTO_RANGE_V in vi.measurement_parameters["voltmeter_range_V"].choices.values()
+    vi.initiate_measurement(current=1e-6, n_readings=2, voltmeter_range_V=AUTO_RANGE_V)
+    assert meter._auto_range is True
+    assert len(vi.take_reading()["voltage_V_array"]) == 2
+
+    vi.standby()
+    vi.initiate_measurement(current=1e-6, n_readings=2, voltmeter_range_V=0.1)
+    assert meter._auto_range is False
+    assert meter.get_range() == pytest.approx(0.1)
+
+
+def _ss_vi_with_current_log():
+    """An SS DC mode VI on sims, plus the list of every current the source was set to."""
+    from cryosoft.virtual_instruments.measurement.measurement_ss_dc_mode import (
+        SSDCModeMeasurementVI,
+    )
+
+    source = SimKeithley6221("SIM")
+    meter = SimKeithley2182A("SIM")
+    source._paired_meter = meter
+    currents = []
+    original = source.set_current
+
+    def logged(value):
+        currents.append(value)
+        return original(value)
+
+    source.set_current = logged
+    vi = SSDCModeMeasurementVI({"source": source, "meter": meter}, max_source_current_A=0.105)
+    return vi, source, meter, currents
+
+
+def test_ss_dc_mode_arming_never_zeroes_the_source():
+    """Arming (and re-arming) writes the target current, never 0 A."""
+    vi, _source, _meter, currents = _ss_vi_with_current_log()
+    vi.initiate_measurement(current=1e-3, n_readings=2)
+    vi.initiate_measurement(current=1e-3, n_readings=2)
+    assert currents and 0.0 not in currents
+    assert len(vi.take_reading()["voltage_V_array"]) == 2
+
+
+def test_ss_dc_mode_route_settings_change_only_what_differs():
+    """apply_route_settings writes only differing values; the current never drops to 0."""
+    vi, _source, meter, currents = _ss_vi_with_current_log()
+    vi.initiate_measurement(current=1e-3, n_readings=2, voltmeter_range_V=0.01, compliance_V=1.0)
+    currents.clear()
+
+    vi.apply_route_settings(current=1e-3, voltmeter_range_V=0.0, compliance_V=1.0)
+    assert currents == []  # same current: not rewritten
+    assert meter._auto_range is True
+
+    vi.apply_route_settings(current=2e-3, voltmeter_range_V=0.1)
+    assert currents == [2e-3]  # straight to the new value, no zero in between
+    assert meter.get_range() == pytest.approx(0.1)
+
+
+def test_ss_dc_mode_route_settings_respect_the_current_ceiling():
+    """The route setter is bounded by max_source_current_A like the arming path."""
+    vi, *_ = _ss_vi_with_current_log()
+    vi.initiate_measurement(current=1e-3, n_readings=2)
+    with pytest.raises(CryoSoftSafetyError):
+        vi.apply_route_settings(current=1.0)
+
+
+def test_ss_dc_mode_disarm_keeps_the_current_standby_zeroes_it():
+    """disarm ends the measurement with the heater on; standby switches it off."""
+    vi, _source, _meter, currents = _ss_vi_with_current_log()
+    vi.initiate_measurement(current=1e-3, n_readings=2)
+    currents.clear()
+
+    vi.disarm()
+    assert currents == []
+    with pytest.raises(RuntimeError):
+        vi.take_reading()
+
+    vi.standby()
+    assert currents == [0.0]

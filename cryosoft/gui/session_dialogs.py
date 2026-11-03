@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QDialog,
@@ -22,7 +20,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from cryosoft.session.store import SessionStore
+from cryosoft.session.store import SessionStore, normalize_relative_path
 
 _SESSION_ID_ROLE = Qt.ItemDataRole.UserRole
 _OWNER_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -40,14 +38,13 @@ class ResumeSessionDialog(QDialog):
     ``Accepted``.
 
     Creating a session asks for its **folder** as well as its display name.
-    A session is a folder holding every experiment run inside it, so which
-    folder that is belongs to the operator rather than to a slug derived
-    from the name behind their back. The folder is still one segment
-    directly under ``<measurement_root>/sessions/<user_id>/`` — the Session
-    tier's layout is structural (ownership IS a directory) — so the field
-    names that one folder and the resolved path is shown in full beneath
-    it. ``SessionStore.validate_session_dirname()`` is the single rule the
-    name is judged by; this dialog only renders its refusal.
+    A session is a folder holding every experiment run inside it, so where
+    that folder is belongs to the operator rather than to a slug derived from
+    the name behind their back. The field is editable and takes any path
+    inside ``<measurement_root>/sessions/`` (sub-folders included, the owner's
+    own folder is only the suggestion); the resolved path is shown in full
+    beneath it. ``SessionStore.validate_session_path()`` is the single rule the
+    path is judged by; this dialog only renders its refusal.
     """
 
     def __init__(
@@ -189,14 +186,22 @@ class ResumeSessionDialog(QDialog):
 
         self._new_dirname_input = QLineEdit()
         self._new_dirname_input.setObjectName("new_session_dirname_input")
-        self._new_dirname_input.setPlaceholderText("folder name")
+        self._new_dirname_input.setPlaceholderText("folder inside the sessions folder")
         self._new_dirname_input.setToolTip(
-            "The folder this session's experiments are saved in, directly "
-            "under this user's sessions folder"
+            "Where this session's experiments are saved, relative to the "
+            "sessions folder. Any sub-folder path is allowed, e.g. "
+            "jdoe/2026/spring/rvst"
         )
         self._new_dirname_input.textEdited.connect(self._on_dirname_edited)
         self._new_dirname_input.textChanged.connect(self._update_create_enabled)
-        form.addRow("Folder:", self._new_dirname_input)
+        browse_btn = QPushButton("Browse…")
+        browse_btn.setObjectName("new_session_browse_btn")
+        browse_btn.setToolTip("Pick the folder inside the sessions folder")
+        browse_btn.clicked.connect(self._on_browse_folder)
+        saved_in_row = QHBoxLayout()
+        saved_in_row.addWidget(self._new_dirname_input, 1)
+        saved_in_row.addWidget(browse_btn)
+        form.addRow("Saved in:", saved_in_row)
 
         self._path_label = QLabel()
         self._path_label.setObjectName("new_session_path_label")
@@ -213,7 +218,7 @@ class ResumeSessionDialog(QDialog):
         self._path_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
-        form.addRow("Saved in:", self._path_label)
+        form.addRow("Full path:", self._path_label)
 
         self._error_label = QLabel()
         self._error_label.setObjectName("new_session_error_label")
@@ -276,25 +281,37 @@ class ResumeSessionDialog(QDialog):
         self._dirname_edited = True
 
     def _suggested_dirname(self, name: str) -> str:
-        """Return the folder name a display name suggests.
+        """Return the folder a display name suggests, inside the sessions folder.
 
-        Uses ``SessionStore.make_session_id()`` so the offered default is
-        exactly what the store would have derived on its own — the chosen
+        Uses ``SessionStore.default_session_path()`` so the offered default is
+        exactly what the store would have derived on its own - the chosen
         folder replaces that derivation rather than running beside it.
 
         Args:
             name: The display name typed so far.
 
         Returns:
-            The suggested folder name, or ``""`` for an empty name.
+            ``"<user_id>/<YYYYMMDD_slug>"``, or ``""`` for an empty name.
         """
         if not name.strip():
             return ""
-        created = datetime.now(timezone.utc).isoformat()
-        return self._store.make_session_id(name, created, self._user_id)
+        return self._store.default_session_path(self._user_id, name)
+
+    def _on_browse_folder(self) -> None:
+        """Let the operator pick the session folder inside the sessions folder."""
+        start = self._store.root
+        while not start.is_dir() and start != start.parent:
+            start = start.parent
+        chosen = QFileDialog.getExistingDirectory(
+            self, "Choose session folder", str(start)
+        )
+        if not chosen:
+            return
+        self._dirname_edited = True
+        self._new_dirname_input.setText(chosen)
 
     def _update_create_enabled(self) -> None:
-        """Enable Create only for a folder name the store would accept."""
+        """Enable Create only for a folder the store would accept."""
         self._update_path_label()
         has_name = bool(self._new_name_input.text().strip())
         dirname = self._new_dirname_input.text().strip()
@@ -303,7 +320,7 @@ class ResumeSessionDialog(QDialog):
             self._create_btn.setEnabled(False)
             return
         try:
-            self._store.validate_session_dirname(dirname, self._user_id)
+            self._store.validate_session_path(dirname, self._user_id)
         except ValueError as exc:
             self._error_label.setText(str(exc))
             self._error_label.show()
@@ -315,8 +332,15 @@ class ResumeSessionDialog(QDialog):
     def _update_path_label(self) -> None:
         """Show the full folder the session would occupy."""
         dirname = self._new_dirname_input.text().strip()
-        base = self._store.root / self._user_id
-        self._path_label.setText(str(base / dirname) if dirname else str(base))
+        if not dirname:
+            self._path_label.setText(str(self._store.root))
+            return
+        try:
+            relative = normalize_relative_path(dirname, self._store.root, "Session")
+        except ValueError:
+            self._path_label.setText(dirname)
+            return
+        self._path_label.setText(str(self._store.root / relative))
 
     def _on_create_clicked(self) -> None:
         """Create the session in the chosen folder, select it, and accept."""
@@ -326,7 +350,7 @@ class ResumeSessionDialog(QDialog):
             return
         try:
             session = self._store.create_session(
-                name=name, user_id=self._user_id, session_dirname=dirname
+                name=name, user_id=self._user_id, session_path=dirname
             )
         except (OSError, ValueError) as exc:
             # Rendered inline, not as a second modal on top of this one.

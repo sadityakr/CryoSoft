@@ -2480,6 +2480,91 @@ def test_measurement_vi_self_description(vi_cls: type) -> None:
         )
 
 
+def _another_value(spec) -> object:
+    """Return a valid value of *spec* that differs from its default."""
+    if spec.choices is not None:
+        return next(v for v in spec.choices.values() if v != spec.default)
+    if spec.type is bool:
+        return not spec.default
+    candidate = spec.default * 2 + 1
+    if spec.max is not None and candidate > spec.max:
+        candidate = spec.min if spec.min is not None else spec.default - 1
+    return spec.type(candidate)
+
+
+@pytest.mark.parametrize(
+    "vi_cls", _all_measurement_vi_classes(), ids=lambda c: c.__name__
+)
+def test_measurement_vi_route_parameters_contract(vi_cls: type) -> None:
+    """route_parameters obeys the route settings standard.
+
+    Every name is an existing ``measurement_parameters`` key, and changing it
+    never changes the reading's shape (``data_arrays``) — the procedure
+    re-arms per route but keeps one HDF5 layout for every route. The empty
+    default always passes trivially.
+    """
+    assert isinstance(vi_cls.route_parameters, tuple), (
+        f"{vi_cls.__name__}.route_parameters must be a tuple"
+    )
+    unknown = sorted(set(vi_cls.route_parameters) - set(vi_cls.measurement_parameters))
+    assert not unknown, (
+        f"{vi_cls.__name__}.route_parameters names {unknown}, not "
+        f"measurement_parameters key(s)"
+    )
+    if not vi_cls.route_parameters:
+        return
+    vi = vi_cls(_build_sim_measurement_drivers())
+    defaults = {name: spec.default for name, spec in vi_cls.measurement_parameters.items()}
+    shape = vi.data_arrays(defaults)
+    for name in vi_cls.route_parameters:
+        changed = {**defaults, name: _another_value(vi_cls.measurement_parameters[name])}
+        assert vi.data_arrays(changed) == shape, (
+            f"{vi_cls.__name__}: route parameter {name!r} changes data_arrays — "
+            f"a route parameter must never change the reading's shape"
+        )
+
+
+@pytest.mark.parametrize(
+    "vi_cls", _all_measurement_vi_classes(), ids=lambda c: c.__name__
+)
+def test_measurement_vi_route_setter_and_run_end_contract(vi_cls: type) -> None:
+    """route_setter / run_end_method name real methods with the right shape.
+
+    A ``route_setter`` is a ``@control`` accepting every route parameter as a
+    keyword argument (the procedure passes a route's values by name); the
+    ``run_end_method`` is callable with no arguments (the procedure passes
+    none). The defaults ("" and "standby") always pass.
+    """
+    if vi_cls.route_setter:
+        assert vi_cls.route_parameters, (
+            f"{vi_cls.__name__} declares route_setter but no route_parameters"
+        )
+        setter = getattr(vi_cls, vi_cls.route_setter, None)
+        assert callable(setter) and getattr(setter, "_is_control", False), (
+            f"{vi_cls.__name__}.route_setter {vi_cls.route_setter!r} must be a "
+            f"@control method"
+        )
+        accepted = set(inspect.signature(setter).parameters) - {"self"}
+        missing = sorted(set(vi_cls.route_parameters) - accepted)
+        assert not missing, (
+            f"{vi_cls.__name__}.{vi_cls.route_setter}() does not accept route "
+            f"parameter(s) {missing}"
+        )
+    end = getattr(vi_cls, vi_cls.run_end_method, None)
+    assert callable(end), (
+        f"{vi_cls.__name__}.run_end_method {vi_cls.run_end_method!r} is not a method"
+    )
+    required = [
+        p for name, p in inspect.signature(end).parameters.items()
+        if name != "self" and p.default is inspect.Parameter.empty
+        and p.kind not in (p.VAR_POSITIONAL, p.VAR_KEYWORD)
+    ]
+    assert not required, (
+        f"{vi_cls.__name__}.{vi_cls.run_end_method}() must be callable with no "
+        f"arguments"
+    )
+
+
 @pytest.mark.parametrize(
     "vi_cls", _all_measurement_vi_classes(), ids=lambda c: c.__name__
 )

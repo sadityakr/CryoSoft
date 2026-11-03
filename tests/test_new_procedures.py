@@ -1268,29 +1268,40 @@ def test_temp_sweep_vti_off_emits_no_targets_on_initiate_or_step(station, tmp_pa
     proc.standby()
 
 
-def test_temp_sweep_sample_follows_sweep_with_offset(station, tmp_path):
-    """The sample setpoint is the swept value plus sample_offset, at the sweep rate."""
+def test_temp_sweep_vti_runs_below_sample_by_offset(station, tmp_path):
+    """The sample goes to the swept value; the VTI to the swept value minus vti_offset."""
     proc = TemperatureSweep(
         station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
         **{**FAST_TEMP, **DC,
-           "set_sample_temperature": True, "sample_offset": -2.5},
+           "set_sample_temperature": True, "vti_offset": 2.5},
     )
     initial = proc.initiate().targets
-    assert initial["temperature_vti"] == Target(300.0, rate=6000.0)
-    assert initial["temperature_sample"] == Target(297.5, rate=6000.0)
+    assert initial["temperature_sample"] == Target(300.0, rate=6000.0)
+    assert initial["temperature_vti"] == Target(297.5, rate=6000.0)
     step = proc.change_sweep_step()
     assert step is not None
-    assert step.targets["temperature_sample"] == Target(297.5, rate=6000.0)
+    assert step.targets["temperature_sample"] == Target(300.0, rate=6000.0)
+    assert step.targets["temperature_vti"] == Target(297.5, rate=6000.0)
     proc.standby()
 
 
-def test_temp_sweep_sample_off_emits_no_sample_target(station, tmp_path):
-    """sample_offset is ignored while set_sample_temperature is off."""
+def test_temp_sweep_vti_off_ignores_vti_offset(station, tmp_path):
+    """vti_offset does nothing while set_vti_temperature is off."""
     proc = TemperatureSweep(
         station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
-        **{**FAST_TEMP, **DC, "sample_offset": 5.0},
+        **{**FAST_TEMP, **DC, "set_vti_temperature": False,
+           "set_sample_temperature": True, "vti_offset": 5.0},
     )
-    assert "temperature_sample" not in proc.initiate().targets
+    targets = proc.initiate().targets
+    assert "temperature_vti" not in targets
+    assert targets["temperature_sample"].target == pytest.approx(300.0)
+    proc.standby()
+
+
+def test_temp_sweep_axis_readback_is_the_sample_temperature(station, tmp_path):
+    """The recorded temperature is the sample stage's read-back, not the VTI's."""
+    proc = _temp_proc(station, tmp_path, DC)
+    assert proc._axis_readback() == pytest.approx(station.temperature_sample.temperature())
     proc.standby()
 
 
@@ -1317,3 +1328,476 @@ def test_temp_sweep_enabled_sample_channel_without_vi_is_refused(tmp_path):
             **{**FAST_TEMP, **DC, "set_sample_temperature": True},
         )
 
+
+
+# ── Per-loop wait: a settle time after each change of a looping parameter ────
+
+class _Clock:
+    """A hand-wound monotonic clock, so a wait is crossed without sleeping."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    from cryosoft.core import procedure as procedure_module
+
+    fake = _Clock()
+    monkeypatch.setattr(procedure_module.time, "monotonic", fake)
+    return fake
+
+
+def test_reading_loop_group_puts_each_wait_under_its_loop_parameter(station):
+    """A selected slot gains a seconds field right after its drop-down."""
+    groups = FieldSweep.get_param_groups(
+        station,
+        {"measurement_vi": "dc_measurement",
+         "loop1_parameter": "dc_measurement.current_A"},
+    )
+    loop = next(g for g in groups if g.key == "reading_loop")
+    names = list(loop.params)
+    assert names[:3] == ["loop1_parameter", "loop1_wait_s", "loop1_values"]
+    assert "loop2_wait_s" not in names  # slot 2 is Off
+    spec = loop.params["loop1_wait_s"]
+    assert (spec.type, spec.unit, spec.min, spec.structural) == (float, "s", 0.0, False)
+
+
+def test_loop_wait_defaults_to_zero_and_runs_the_grid_in_one_call(station, tmp_path):
+    """No wait set: measure() finishes the whole grid in one call, as before."""
+    proc = _field_proc(station, tmp_path, {**DC, **CURRENTS2})
+    proc.initiate()
+    _arm(station, DC, proc)
+    proc.measure()
+    pending = proc.measure_pending
+    proc.standby()
+    assert pending is False
+    assert proc._params["loop1_wait_s"] == 0.0
+
+
+def test_loop_wait_is_waited_out_across_calls_without_blocking(station, tmp_path, clock):
+    """Each change of a looping value waits, then reads; one datapoint results."""
+    proc = _field_proc(
+        station, tmp_path, {**DC, **CURRENTS2, "loop1_wait_s": 5.0}
+    )
+    proc.initiate()
+    _arm(station, DC, proc)
+
+    proc.measure()  # dispatches value 1, then must wait
+    assert proc.measure_pending is True
+    assert proc.last_datapoint is None or proc.last_datapoint == {}
+    clock.now += 4.9
+    proc.measure()  # still settling
+    assert proc.measure_pending is True
+    clock.now += 0.2
+    proc.measure()  # reads 1, dispatches value 2, waits again
+    assert proc.measure_pending is True
+    clock.now += 5.0
+    proc.measure()  # reads 2, saves
+    assert proc.measure_pending is False
+    assert proc.last_datapoint
+    filepath = proc._data_manager.filepath
+    proc.standby()
+    with h5py.File(filepath, "r") as f:
+        assert f["data"]["voltage_V_array"].shape[1] == 2  # both loop values read
+
+
+def test_inner_wait_applies_before_every_reading_and_outer_adds_on_row_change(
+    station, tmp_path, clock
+):
+    """Loop 2 waits before each reading; a row's first reading also waits loop 1."""
+    proc = _field_proc_scanner(
+        station, tmp_path, DC, {**BOTH, "loop1_wait_s": 10.0, "loop2_wait_s": 2.0}
+    )
+    proc.initiate()
+    _arm(station, DC, proc)
+
+    ticks = 0
+    proc.measure()
+    while proc.measure_pending:
+        clock.now += 0.5
+        ticks += 1
+        assert ticks < 200
+        proc.measure()
+    proc.standby()
+    # 2x2 grid: each row's first reading waits 10 + 2 s, the second 2 s.
+    assert (clock.now - 1000.0) == pytest.approx(2 * (12.0 + 2.0), abs=0.5)
+
+
+def test_negative_loop_wait_is_refused(station, tmp_path):
+    from cryosoft.core.exceptions import CryoSoftConfigError
+
+    with pytest.raises(CryoSoftConfigError, match="loop1_wait_s"):
+        _field_proc(station, tmp_path, {**DC, **CURRENTS2, "loop1_wait_s": -1.0})
+
+
+def test_abort_drops_a_part_finished_grid(station, tmp_path, clock):
+    proc = _field_proc(station, tmp_path, {**DC, **CURRENTS2, "loop1_wait_s": 5.0})
+    proc.initiate()
+    _arm(station, DC, proc)
+    proc.measure()
+    assert proc.measure_pending is True
+    proc.abort()
+    assert proc.measure_pending is False
+
+
+def test_probe_caps_loop_waits_and_estimate_counts_them(station, tmp_path):
+    from cryosoft.core.plan import ProbeSpec
+
+    proc = _field_proc(station, tmp_path, {**DC, **CURRENTS2, "loop1_wait_s": 90.0})
+    base = _field_proc(station, tmp_path, {**DC, **CURRENTS2})
+    cost = proc.estimate_step_seconds()
+    assert cost.measure_s - base.estimate_step_seconds().measure_s == pytest.approx(180.0)
+    proc.apply_probe(ProbeSpec())
+    assert proc._params["loop1_wait_s"] <= ProbeSpec().max_wait_s
+
+
+def test_loop_wait_is_honoured_between_ticks_not_rounded_up_to_one(
+    station, tmp_path, qtbot
+):
+    """A 0.3 s wait on a 1 s tick finishes the grid in ~0.6 s, not at the next ticks."""
+    import time
+
+    from cryosoft.core.orchestrator import Orchestrator
+
+    proc = _field_proc(station, tmp_path, {**DC, **CURRENTS2, "loop1_wait_s": 0.3})
+    calls: list[float] = []
+    real_measure = proc.measure
+
+    def timed_measure() -> None:
+        calls.append(time.monotonic())
+        real_measure()
+
+    proc.measure = timed_measure
+    orch = Orchestrator(station, tick_interval_ms=1000)
+    orch.run_procedure(proc)
+    with qtbot.waitSignal(orch.measurement_ready, timeout=60000):
+        pass
+
+    # Two waits of 0.3 s. Rounded up to ticks it would take >= 2 s. The waits
+    # are shorter than the tick, so no tick runs inside them: three measure()
+    # calls (dispatch+wait, read+dispatch+wait, read+save); a timer firing a
+    # millisecond early adds a retry, a tick would add seconds.
+    assert 3 <= len(calls) <= 5
+    assert 0.55 <= calls[-1] - calls[0] < 1.2
+    orch.abort_procedure()
+
+
+def test_tick_runs_during_a_wait_only_if_more_than_a_tick_period_is_left(
+    station, tmp_path
+):
+    """A pending wait of 5 s on a 3 s tick: tick allowed at 5 s left, skipped at 2 s."""
+    from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
+
+    proc = _field_proc(station, tmp_path, {**DC, **CURRENTS2, "loop1_wait_s": 5.0})
+    proc.initiate()
+    _arm(station, DC, proc)
+    orch = Orchestrator(station, tick_interval_ms=3000)
+    orch._timer.stop()
+    orch._procedure = proc
+    orch._state = OrchestratorState.MEASURING
+
+    proc.measure()  # dispatches value 1, waits 5 s
+    assert proc.measure_pending is True
+    assert orch._tick_would_disturb_wait() is False  # ~5 s left > 3 s tick
+    proc._measure_cursor["ready_at"] -= 2.5  # ~2.5 s left <= 3 s tick
+    assert orch._tick_would_disturb_wait() is True
+    orch._state = OrchestratorState.RAMPING
+    assert orch._tick_would_disturb_wait() is False
+    proc.abort()
+
+
+# ── Route settings: the measurement re-armed per switch route ────────────────
+# keithley_dc_mode declares route_parameters (current, voltmeter_range_V,
+# compliance_V); with route_settings on, each picked route carries its own.
+
+DCMODE = {"measurement_vi": "keithley_dc_mode", "n_readings": 3, "delay_s": 0.0}
+ROUTE_SETTINGS = {
+    **ROUTES2,
+    "route_settings": True,
+    "route_Mux-Ch1__current": 1e-6,
+    "route_Mux-Ch1__voltmeter_range_V": 0.01,
+    "route_Mux-Ch1__compliance_V": 1.0,
+    "route_Mux-Ch2__current": 1e-7,
+    "route_Mux-Ch2__voltmeter_range_V": 0.0,  # autorange
+    "route_Mux-Ch2__compliance_V": 2.0,
+}
+
+
+def _spy_commands(station):
+    """Record every batch sent through send_measurement_commands (and send it)."""
+    calls = []
+    original = station.send_measurement_commands
+
+    def spy(commands, **kwargs):
+        calls.append(list(commands))
+        return original(commands, **kwargs)
+
+    station.send_measurement_commands = spy
+    return calls
+
+
+def _flat(calls):
+    return [(c.vi_name, c.method, dict(c.kwargs)) for batch in calls for c in batch]
+
+
+def test_route_settings_first_route_arms_the_measurement(station, tmp_path):
+    """initiate() connects the first route, then arms with ITS values."""
+    proc = _field_proc_scanner(station, tmp_path, DCMODE, ROUTE_SETTINGS)
+    plan = proc.initiate()
+    proc.standby()
+
+    assert [(c.vi_name, c.method) for c in plan.commands] == [
+        ("switch_matrix", "select_route"),
+        ("keithley_dc_mode", "initiate_measurement"),
+    ]
+    arm = plan.commands[1].kwargs
+    assert arm["current"] == 1e-6
+    assert arm["voltmeter_range_V"] == 0.01
+    assert arm["compliance_V"] == 1.0
+    assert arm["n_readings"] == 3
+
+
+def test_route_settings_switch_off_and_rearm_on_route_change(station, tmp_path):
+    """A route whose settings differ: standby, select_route, re-arm with its values."""
+    import json
+
+    proc = _field_proc_scanner(station, tmp_path, DCMODE, ROUTE_SETTINGS)
+    plan = proc.initiate()
+    station.send_measurement_commands(plan.commands)
+    calls = _spy_commands(station)
+    meter = station.get_vi("keithley_dc_mode")._meter
+    filepath = proc._data_manager.filepath
+    try:
+        proc.measure()
+        assert meter._auto_range is True  # Mux-Ch2 armed with autorange
+        first = _flat(calls)
+        calls.clear()
+        proc.change_sweep_step()
+        proc.measure()  # next datapoint starts back on Mux-Ch1
+        second = _flat(calls)
+    finally:
+        proc.standby()
+
+    # Mux-Ch1 is already armed -> a plain select; Mux-Ch2 differs -> re-arm.
+    assert [(vi, m) for vi, m, _ in first] == [
+        ("switch_matrix", "select_route"),
+        ("keithley_dc_mode", "standby"),
+        ("switch_matrix", "select_route"),
+        ("keithley_dc_mode", "initiate_measurement"),
+    ]
+    rearm = first[3][2]
+    assert (rearm["current"], rearm["voltmeter_range_V"], rearm["compliance_V"]) == (
+        1e-7, 0.0, 2.0,
+    )
+    assert second[0][:2] == ("keithley_dc_mode", "standby")
+    assert second[2][2]["current"] == 1e-6
+    assert second[2][2]["voltmeter_range_V"] == 0.01
+
+    with h5py.File(filepath, "r") as f:
+        assert f["data"]["voltage_V_array"].shape[1:] == (2, 1, 3)
+        params = json.loads(f["metadata"].attrs["procedure_params"])
+    assert params["route_settings_values"]["Mux-Ch2"] == {
+        "current": 1e-7, "voltmeter_range_V": 0.0, "compliance_V": 2.0,
+    }
+
+
+def test_route_settings_equal_routes_never_switch_the_source_off(station, tmp_path):
+    """Routes with identical settings keep the plain select_route path."""
+    same = {
+        **ROUTES2,
+        "route_settings": True,
+        "route_Mux-Ch2__current": 1e-6,  # Mux-Ch1 falls back to the run-wide 1e-6
+    }
+    proc = _field_proc_scanner(station, tmp_path, {**DCMODE, "current": 1e-6}, same)
+    plan = proc.initiate()
+    station.send_measurement_commands(plan.commands)
+    calls = _spy_commands(station)
+    try:
+        proc.measure()
+    finally:
+        proc.standby()
+    assert [m for _, m, _ in _flat(calls)] == ["select_route", "select_route"]
+
+
+def test_route_settings_rearm_restores_an_outer_looped_current(station, tmp_path):
+    """Route inner, current outer: re-arming is followed by the outer current."""
+    loop = {
+        "loop1_parameter": "keithley_dc_mode.current",
+        "loop1_values": "1e-6, 2e-6",
+        "loop2_parameter": "switch_matrix.route",
+        "loop2_pick_Mux-Ch1": True,
+        "loop2_pick_Mux-Ch2": True,
+        "route_settings": True,
+        "route_Mux-Ch2__voltmeter_range_V": 0.1,
+    }
+    proc = _field_proc_scanner(station, tmp_path, DCMODE, loop)
+    # The looped current is not a per-route setting.
+    assert set(proc._route_settings["Mux-Ch1"]) == {"voltmeter_range_V", "compliance_V"}
+    plan = proc.initiate()
+    station.send_measurement_commands(plan.commands)
+    calls = _spy_commands(station)
+    try:
+        proc.measure()
+    finally:
+        proc.standby()
+
+    flat = _flat(calls)
+    rearms = [i for i, (_, m, _) in enumerate(flat) if m == "initiate_measurement"]
+    assert rearms
+    for i in rearms:
+        assert flat[i + 1][1] == "set_dc_current"
+    # The second outer row re-arms with the row's current, 2e-6.
+    assert flat[rearms[-1] + 1][2] == {"current": 2e-6}
+
+
+@pytest.mark.parametrize(
+    "extra, match",
+    [
+        ({"route_Mux-Ch2__current": 1.0}, "outside the setup's limits"),
+        ({"route_Mux-Ch2__voltmeter_range_V": 0.5}, "allowed choices"),
+        ({"route_Mux-Ch2__current": "abc"}, "not a valid float"),
+    ],
+)
+def test_route_settings_bad_value_refused_at_build(station, tmp_path, extra, match):
+    """A bad per-route value fails when the run is built, not at a route change."""
+    from cryosoft.core.exceptions import CryoSoftConfigError
+
+    with pytest.raises(CryoSoftConfigError, match=match):
+        _field_proc_scanner(station, tmp_path, DCMODE, {**ROUTE_SETTINGS, **extra})
+
+
+def test_route_settings_need_the_route_in_a_slot(station, tmp_path):
+    """route_settings without the switch's route in a loop slot is refused."""
+    from cryosoft.core.exceptions import CryoSoftConfigError
+
+    loop = {
+        "loop1_parameter": "keithley_dc_mode.current",
+        "loop1_values": "1e-6, -1e-6",
+        "route_settings": True,
+    }
+    with pytest.raises(CryoSoftConfigError, match="route settings need"):
+        _field_proc_scanner(station, tmp_path, DCMODE, loop)
+
+
+def test_route_settings_form_groups(station):
+    """The toggle sits in the Reading loop; its fields get their own group.
+
+    The run-wide fields they replace leave the measurement group.
+    """
+    station.set_scanner_enabled(True)
+    selections = {
+        "measurement_vi": "keithley_dc_mode",
+        "loop1_parameter": "switch_matrix.route",
+        "loop1_pick_Mux-Ch1": True,
+        "loop1_pick_Mux-Ch3": True,
+    }
+    groups = {g.key: g for g in FieldSweep.get_param_groups(station, selections)}
+    assert "route_settings" in groups["reading_loop"].params
+    assert "route_settings" not in groups
+    assert "current" in groups["measurement:keithley_dc_mode"].params
+
+    groups = {
+        g.key: g
+        for g in FieldSweep.get_param_groups(station, {**selections, "route_settings": True})
+    }
+    assert list(groups["route_settings"].params) == [
+        f"route_{route}__{param}"
+        for route in ("Mux-Ch1", "Mux-Ch3")
+        for param in ("current", "voltmeter_range_V", "compliance_V")
+    ]
+    meas = groups["measurement:keithley_dc_mode"].params
+    assert not {"current", "voltmeter_range_V", "compliance_V"} & set(meas)
+    assert "n_readings" in meas
+
+
+def test_route_settings_not_offered_for_a_vi_without_route_parameters(station):
+    """A measurement VI declaring no route_parameters gets no toggle."""
+    station.set_scanner_enabled(True)
+    selections = {
+        "measurement_vi": "keithley_delta_mode",
+        "loop1_parameter": "switch_matrix.route",
+        "loop1_pick_Mux-Ch1": True,
+    }
+    groups = {g.key: g for g in FieldSweep.get_param_groups(station, selections)}
+    assert "route_settings" not in groups["reading_loop"].params
+
+
+# ── SS DC mode: route settings with the heater current held on ───────────────
+
+SSDC = {"measurement_vi": "keithley_ss_dc_mode", "n_readings": 3, "delay_s": 0.0}
+SS_ROUTES = {
+    **ROUTES2,
+    "route_settings": True,
+    "route_Mux-Ch1__current": 1e-3,
+    "route_Mux-Ch1__voltmeter_range_V": 0.01,
+    "route_Mux-Ch2__current": 1e-3,
+    "route_Mux-Ch2__voltmeter_range_V": 0.0,  # only the voltmeter differs
+}
+
+
+def test_ss_dc_mode_route_change_applies_settings_without_standby(station, tmp_path):
+    """A route_setter VI: select_route then apply_route_settings — no standby, no re-arm."""
+    proc = _field_proc_scanner(station, tmp_path, SSDC, SS_ROUTES)
+    plan = proc.initiate()
+    station.send_measurement_commands(plan.commands)
+    calls = _spy_commands(station)
+    try:
+        proc.measure()
+        proc.change_sweep_step()
+        proc.measure()
+    finally:
+        proc.abort()
+
+    flat = _flat(calls)
+    methods = [m for _, m, _ in flat]
+    assert "standby" not in methods
+    assert "initiate_measurement" not in methods
+    applied = [kw for _, m, kw in flat if m == "apply_route_settings"]
+    assert applied[0] == {"current": 1e-3, "voltmeter_range_V": 0.0, "compliance_V": 1.0}
+    assert applied[1]["voltmeter_range_V"] == 0.01  # back on Mux-Ch1
+
+
+def test_ss_dc_mode_source_never_zeroed_during_the_run(station, tmp_path):
+    """Across arming, route changes and two datapoints the 6221 never sees 0 A."""
+    source = station.get_vi("keithley_ss_dc_mode")._source
+    currents = []
+    original = source.set_current
+    source.set_current = lambda value: (currents.append(value), original(value))[1]
+    proc = _field_proc_scanner(
+        station, tmp_path, SSDC, {**SS_ROUTES, "route_Mux-Ch2__current": 2e-3}
+    )
+    plan = proc.initiate()
+    station.send_measurement_commands(plan.commands)
+    proc.measure()
+    proc.change_sweep_step()
+    proc.measure()
+    end = proc.standby()
+    station.send_measurement_commands(end.commands)
+    source.set_current = original
+
+    assert currents and 0.0 not in currents
+    assert 2e-3 in currents
+
+
+def test_ss_dc_mode_normal_end_disarms_abort_switches_off(station, tmp_path):
+    """Normal end dispatches run_end_method (disarm); abort always standby."""
+    proc = _field_proc_scanner(station, tmp_path, SSDC, SS_ROUTES)
+    proc.initiate()
+    end = proc.standby()
+    assert end.commands[0] == Command("keithley_ss_dc_mode", "disarm", {})
+
+    proc = _field_proc_scanner(station, tmp_path, SSDC, SS_ROUTES)
+    proc.initiate()
+    aborted = proc.abort()
+    assert aborted[0] == Command("keithley_ss_dc_mode", "standby", {})
+
+
+def test_dc_mode_normal_end_still_switches_off(station, tmp_path):
+    """The default run_end_method is standby: DC mode is unchanged."""
+    proc = _field_proc_scanner(station, tmp_path, DCMODE, ROUTE_SETTINGS)
+    proc.initiate()
+    assert proc.standby().commands[0] == Command("keithley_dc_mode", "standby", {})

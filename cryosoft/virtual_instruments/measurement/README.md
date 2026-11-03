@@ -60,6 +60,20 @@ Uniform lifecycle (methods)
   BEFORE that padding is applied. This fixed-shape guarantee prevents
   HDF5 layout mismatches mid-run.
 - `standby() → None` — safe-off idle state.
+- `route_parameters: tuple[str, ...]` — OPTIONAL route settings declaration
+  (default `()`): the `measurement_parameters` names that may take a
+  different value on each switch route. The generic sweep procedure then
+  offers per-route fields and re-arms through `initiate_measurement` (source
+  off first) at every route change whose values differ — no extra setter.
+  A route parameter must never change `data_arrays()`. See GLOSSARY.md's
+  **Route settings**.
+- `route_setter: str` — OPTIONAL (default `""`): a `@control` taking the
+  route parameters by name that applies one route's values to the ARMED
+  instrument. Declared, the procedure dispatches `select_route` + this setter
+  at a route change instead of switch-off and re-arm.
+- `run_end_method: str` — OPTIONAL (default `"standby"`): the argument-less
+  method dispatched when a run ends normally. Abort, failure and EMERGENCY
+  always dispatch `standby`. See GLOSSARY.md's **Run end method**.
 - `ping() → bool` — IDN check on all drivers.
 - `reading_setters: dict[str, str]` — OPTIONAL reading-loop declaration
   (default `{}`): maps a `measurement_parameters` name to the cheap setter
@@ -284,7 +298,10 @@ shared-6221 handoff test for the pattern.
   contrast with `dc_separate_measurement.py`'s reference `reading_setters`
   entry and `measurement_delta_mode.py`'s polarity-reversing delta engine).
   Declares `reading_setters` `{"current": "set_dc_current"}`; the setter
-  reprograms the source in place with no re-arm cost. Also exposes
+  reprograms the source in place with no re-arm cost. Declares
+  `route_parameters` `("current", "voltmeter_range_V", "compliance_V")`;
+  `voltmeter_range_V` offers "Auto" (`AUTO_RANGE_V = 0.0`), which arms the
+  2182A's autorange via the meter driver's `set_auto_range(True)`. Also exposes
   `read_now()`, a `@control(panel=False)` bench-test hook (front panel only,
   never the compact card) distinct from `take_reading()`: it calls
   `take_reading()` and caches the result in the `last_voltage_V` /
@@ -302,6 +319,13 @@ shared-6221 handoff test for the pattern.
 - `dc_single_instrument.py` — `DCSingleInstrumentVI`: Keithley 2400 SMU,
   single-instrument DC mode with the same method contract. tests:
   `tests/test_l1_new_vis.py` (`TestDCSingleInstrumentVI`).
+- `measurement_ss_dc_mode.py` — `SSDCModeMeasurementVI`: spin Seebeck DC mode,
+  a `DCModeMeasurementVI` whose heater current stays on. Arming never zeroes
+  the source (`_arming_baseline_current` returns the target);
+  `route_setter = "apply_route_settings"` changes only the differing
+  compliance / range (incl. Auto) / current with the source on;
+  `run_end_method = "disarm"` leaves the current on after a normal run end.
+  `standby()` (abort, failure, EMERGENCY) zeroes it.
 - `measurement_delta_mode.py` — `DeltaModeMeasurementVI`: Keithley 6221 + 2182A in
   delta-mode (reverses current polarity each reading for offset cancellation).
   Pads short delta returns to `n_readings` with NaN and reports `n_valid`.

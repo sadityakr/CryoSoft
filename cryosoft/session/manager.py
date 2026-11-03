@@ -33,7 +33,12 @@ from cryosoft.session.run_queue import (
     RunSpec,
     RunValidation,
 )
-from cryosoft.session.store import ExperimentStore, SessionStore, UserRoster
+from cryosoft.session.store import (
+    ExperimentStore,
+    SessionStore,
+    UserRoster,
+    normalize_relative_path,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from collections.abc import Mapping
@@ -256,8 +261,8 @@ class ExperimentManager(QObject):
                 Orchestrator for every writer until the experiment closes.
             attended: Initial attendance flag.
             experiment_dirname: Optional override for the experiment's
-                folder name (and therefore its ``experiment_id``), directly
-                under the session folder — flat only, no nesting. ``None``
+                folder (and therefore its ``experiment_id``): a path inside the
+                session folder, sub-folders allowed. ``None``
                 (the default) falls back to
                 ``self._store.make_experiment_id(title, created)``.
 
@@ -267,9 +272,8 @@ class ExperimentManager(QObject):
         Raises:
             ValueError: If ``title`` is empty, another experiment is open,
                 ``user_id`` is not in the roster, or ``experiment_dirname``
-                is given but is empty, contains a path separator, is
-                ``"."``/``".."``, or collides with an existing experiment
-                folder in this session.
+                is given but is empty, leaves the session folder, or lands
+                in or inside an existing experiment folder.
             OSError: If the record cannot be written.
         """
         if not title.strip():
@@ -331,27 +335,25 @@ class ExperimentManager(QObject):
         """
         if experiment_dirname is None:
             return self._store.make_experiment_id(title, created_utc)
-        candidate = experiment_dirname.strip()
-        if not candidate:
-            raise ValueError("Experiment folder name must not be empty")
-        # Both separators are rejected on every platform, deliberately not via
-        # os.sep/os.altsep: an experiment folder written on Linux is routinely
-        # opened on a Windows analysis machine, where a backslash in the name
-        # would split into a nested path. Keying off the host's separators let
-        # "a\b" through on Linux (os.sep="/", os.altsep=None) while rejecting
-        # it on Windows — the same name, two different verdicts.
-        if "/" in candidate or "\\" in candidate:
-            raise ValueError(
-                f"Experiment folder name {experiment_dirname!r} must not contain "
-                "a path separator — it names a single folder directly under "
-                "the session, not a nested path"
-            )
-        if candidate in (".", ".."):
-            raise ValueError(f"Experiment folder name {experiment_dirname!r} is not allowed")
-        if candidate in self._store.list_experiments():
-            raise ValueError(
-                f"An experiment folder named {candidate!r} already exists in this session"
-            )
+        # Free location inside the session folder: sub-folders are allowed
+        # (the id is then the relative POSIX path), nothing may leave it.
+        candidate = normalize_relative_path(
+            experiment_dirname, self._store.root, "Experiment"
+        )
+        parts = candidate.split("/")
+        for depth in range(1, len(parts) + 1):
+            if (
+                self._store.root.joinpath(*parts[:depth]) / "experiment.json"
+            ).is_file():
+                if depth == len(parts):
+                    raise ValueError(
+                        f"An experiment folder named {candidate!r} already "
+                        "exists in this session"
+                    )
+                raise ValueError(
+                    f"{candidate!r} is inside the experiment "
+                    f"{'/'.join(parts[:depth])!r}"
+                )
         return candidate
 
     def rebind_session(self, user_id: str, session_id: str) -> None:
@@ -1174,7 +1176,7 @@ class ExperimentManager(QObject):
         """
         if self._session_store is None:
             return None
-        return self._store.root.parent.name, self._store.root.name
+        return self._session_store.locate(self._store.root)
 
     def _reconcile_session_index(self) -> None:
         """Rebuild the active session's ``experiments`` index from its folder.

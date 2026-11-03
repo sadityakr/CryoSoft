@@ -6,6 +6,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import qtawesome as qta
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -167,6 +168,21 @@ class ExperimentInfoPanel(QWidget):
             self._start_close_btn.clicked.connect(self._on_start_close_clicked)
         status_row.addWidget(self._start_close_btn)
         section.addLayout(status_row)
+
+        # Where the open experiment lives on disk, selectable so it can be
+        # copied; hidden while nothing is open.
+        self._experiment_path_label = QLabel("")
+        self._experiment_path_label.setObjectName("experiment_path_label")
+        self._experiment_path_label.setProperty("class", "secondary_label")
+        self._experiment_path_label.setWordWrap(True)
+        self._experiment_path_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        self._experiment_path_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self._experiment_path_label.setVisible(False)
+        section.addWidget(self._experiment_path_label)
 
         self._attended_checkbox = QCheckBox("Attended")
         self._attended_checkbox.setObjectName("attended_checkbox")
@@ -343,6 +359,7 @@ class ExperimentInfoPanel(QWidget):
             self._session_manager.roster,
             self,
             envelope_variables=self._session_manager.envelope_variables(),
+            session_root=self._session_manager.store.root,
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -383,6 +400,7 @@ class ExperimentInfoPanel(QWidget):
             self._experiment_status_label.setText("No experiment open")
             self._start_close_btn.setText("Start Experiment…")
             self._attended_checkbox.setVisible(False)
+            self._experiment_path_label.setVisible(False)
             self._set_envelope_visible(False)
             self._eln_link_url = ""
             self._refresh_eln_label()
@@ -402,6 +420,12 @@ class ExperimentInfoPanel(QWidget):
             f"({'attended' if attended else 'unattended'})"
         )
         self._start_close_btn.setText("Close Experiment…")
+        if self._session_manager is not None:
+            folder = self._session_manager.store.root / str(
+                record.get("experiment_id", "")
+            )
+            self._experiment_path_label.setText(f"Saved in: {folder}")
+            self._experiment_path_label.setVisible(True)
         self._set_envelope_visible(True)
         if self._envelope_editor is not None:
             # The experiment already HAS an envelope; showing the setup's own

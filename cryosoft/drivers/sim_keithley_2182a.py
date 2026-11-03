@@ -38,6 +38,7 @@ class SimKeithley2182A:
         self._base_voltage: float = 1.5e-6  # Volts — simulated signal level
         self._noise_std: float = 1e-8       # Gaussian noise standard deviation
         self._range: float = 0.1            # Volts measurement range
+        self._auto_range: bool = False      # channel-1 autorange
         # Free-running (continuous initiation) is the instrument's power-up
         # default; CryoSoft's reading paths pin it off when they arm.
         self._continuous_initiation: bool = True
@@ -91,6 +92,20 @@ class SimKeithley2182A:
                 vi_name="SimKeithley2182A",
             )
         self._range = float(range_v)
+        # As on the instrument, a fixed range turns autorange off.
+        self._auto_range = False
+
+    def set_auto_range(self, enabled: bool) -> None:
+        """Turn simulated channel-1 autorange on or off.
+
+        Mirrors the real driver's ``:SENS:VOLT:CHAN1:RANG:AUTO`` write; a later
+        :meth:`set_range` turns it off again, as on the instrument.
+
+        Args:
+            enabled: True for autorange, False to hold the present range.
+        """
+        self._check_error()
+        self._auto_range = bool(enabled)
 
     def get_range(self) -> float:
         """Return the current voltage range setting in Volts."""

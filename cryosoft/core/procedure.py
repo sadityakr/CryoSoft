@@ -726,6 +726,28 @@ class BaseProcedure:
         """
         raise NotImplementedError(f"{type(self).__name__} must implement measure()")
 
+    @property
+    def measure_pending(self) -> bool:
+        """Whether ``measure()`` has more to do at the current sweep point.
+
+        The Orchestrator calls ``measure()`` once per tick and stays in
+        MEASURING while this is True, so a procedure that must wait inside a
+        datapoint (a reading-loop settle time) returns from ``measure()``
+        instead of blocking the tick, and is called again next tick. The
+        datapoint is only announced and the sweep only advanced once this is
+        False again. Always False unless a subclass overrides it.
+        """
+        return False
+
+    @property
+    def measure_resume_in_s(self) -> float:
+        """Seconds until a pending ``measure()`` can make progress (0 if none).
+
+        Lets the Orchestrator call ``measure()`` again exactly when a wait ends
+        rather than at the next tick. Meaningful only while ``measure_pending``.
+        """
+        return 0.0
+
     def standby(self) -> PhasePlan:
         """Close the data file and return the safe-parking plan.
 
@@ -801,16 +823,37 @@ class BaseProcedure:
 
 # Form-parameter names the generic sweep procedure owns structurally (they are
 # never a measurement VI's own knobs, so a VI param may not shadow them). The
-# dynamic per-choice pick checkboxes live in the "loopN_pick_" namespace.
+# dynamic per-choice pick checkboxes live in the "loopN_pick_" namespace, the
+# per-route fields of the route settings in the "route_<route>__" one.
 _STRUCTURAL_PARAM_NAMES = frozenset(
     {
         "measurement_vi",
         "loop1_parameter",
         "loop1_values",
+        "loop1_wait_s",
         "loop2_parameter",
         "loop2_values",
+        "loop2_wait_s",
+        "route_settings",
+        "route_settings_values",
     }
 )
+
+
+def route_field_name(route: str, param_name: str) -> str:
+    """Return the form-parameter name of one route's value of a route parameter.
+
+    ``"route_<route>__<param>"``: route names may not contain ``"__"`` (see
+    GLOSSARY.md's **Route**), so the name splits back unambiguously.
+
+    Args:
+        route: The configured switch route name.
+        param_name: The measurement VI's route parameter name.
+
+    Returns:
+        The namespaced form-parameter name.
+    """
+    return f"route_{route}__{param_name}"
 
 
 class SweepMeasureProcedure(BaseProcedure):
@@ -854,6 +897,15 @@ class SweepMeasureProcedure(BaseProcedure):
       Station, never by direct VI calls; participating non-measurement VIs
       get their ``reading_safe_off`` (e.g. the switch's ``open_all``) at
       standby/abort.
+    * **Route settings.** With the switch's route in a loop slot and the
+      ``route_settings`` switch on, each picked route carries its own value of
+      every ``route_parameters`` entry the measurement VI declares (minus any
+      parameter already looped), in ``route_<route>__<param>`` fields; a blank
+      field means the run-wide value. The first route's values arm the VI at
+      ``initiate()``; at every later route change whose values differ, the
+      source is switched off (``standby``) before ``select_route`` and the VI
+      is re-armed with that route's values. The resolved table is recorded as
+      ``procedure_params["route_settings_values"]``.
 
     A concrete axis procedure (``FieldSweep``, ``TemperatureSweep``) subclasses
     this and supplies only the axis-specific pieces via the hooks below:
@@ -967,6 +1019,8 @@ class SweepMeasureProcedure(BaseProcedure):
         for slot, prefix in (("loop1", "A"), ("loop2", "B")):
             qualified = str(param_values.get(f"{slot}_parameter") or "")
             self._params[f"{slot}_parameter"] = qualified
+            wait_s = self._parse_loop_wait(slot, param_values.get(f"{slot}_wait_s"))
+            self._params[f"{slot}_wait_s"] = wait_s
             if not qualified:
                 self._params[f"{slot}_values"] = []
                 continue
@@ -1031,6 +1085,9 @@ class SweepMeasureProcedure(BaseProcedure):
                     "setter": setter,
                     "values": values,
                     "labels": labels,
+                    # Settle time after each dispatch of this slot's value;
+                    # only a looping slot (labels) ever waits — see measure().
+                    "wait_s": wait_s,
                     # Which loop_shape axis this slot occupies: 0 = loop1
                     # (outer), 1 = loop2 (inner) — see measure()/_loop_shape.
                     "axis": 0 if slot == "loop1" else 1,
@@ -1042,6 +1099,18 @@ class SweepMeasureProcedure(BaseProcedure):
         self._loop_levels: list[dict[str, Any]] = [
             s for s in self._loop_slots if s["labels"]
         ]
+
+        # ── Route settings: the measurement re-armed per switch route ────────
+        # Resolved and validated here (values, choices, the setup's control
+        # limits) so a bad route value fails at the procedure boundary, never
+        # at a route change mid-run. See _route_change_commands().
+        self._route_slot: dict[str, Any] | None = None
+        self._route_settings: dict[str, dict[str, Any]] = {}
+        self._armed_route_settings: dict[str, Any] | None = None
+        route_settings_on = bool(param_values.get("route_settings"))
+        self._params["route_settings"] = route_settings_on
+        if route_settings_on:
+            self._resolve_route_settings(station, vi, param_values)
 
         # Live-plot / data keys: the plain measurement column names (the
         # VI's mean/error/array triple names), minus the raw sample arrays —
@@ -1059,6 +1128,203 @@ class SweepMeasureProcedure(BaseProcedure):
         # has checked the selected VI for a last_settings_snapshot attribute,
         # so that check runs at most once per run — see measure().
         self._snapshot_recorded: bool = False
+
+        # In-flight reading grid of the current datapoint (None between
+        # datapoints) — what lets measure() return mid-grid to wait without
+        # blocking the tick; see measure() and BaseProcedure.measure_pending.
+        self._measure_cursor: dict[str, Any] | None = None
+
+    @staticmethod
+    def _route_parameter_specs(
+        vi_name: str, vi: Any, slot_parameters: Iterable[str]
+    ) -> dict[str, ParamSpec]:
+        """Return the route parameters a run may set per route.
+
+        The VI's ``active_route_parameters`` minus any of its own parameters
+        already selected in a loop slot — a looped value is set per reading,
+        so a per-route value for it would be overwritten at once.
+
+        Args:
+            vi_name: The selected measurement VI's name.
+            vi: The selected measurement VI.
+            slot_parameters: The qualified ``vi_name.param`` loop-slot selections.
+
+        Returns:
+            ``{param_name: ParamSpec}`` in the VI's declaration order.
+        """
+        looped = {
+            qualified.split(".", 1)[1]
+            for qualified in slot_parameters
+            if qualified.startswith(f"{vi_name}.")
+        }
+        return {
+            name: spec
+            for name, spec in vi.active_route_parameters.items()
+            if name not in looped
+        }
+
+    @staticmethod
+    def _route_qualified(station: Station) -> str:
+        """Return the switch route's qualified loop name, or ``""`` when none.
+
+        Args:
+            station: The active Station.
+
+        Returns:
+            ``"<switch_vi>.route"`` while the scanner is enabled and the
+            station has a switch, else ``""``.
+        """
+        switch_names = station.switch_vi_names() if station.scanner_enabled() else []
+        return f"{switch_names[0]}.route" if switch_names else ""
+
+    def _resolve_route_settings(
+        self, station: Station, vi: Any, param_values: Mapping[str, Any]
+    ) -> None:
+        """Resolve every picked route's arming values from the form.
+
+        A route field left blank (or absent) falls back to the run-wide value
+        of that parameter. Each value is checked against the parameter's spec
+        and the setup's ``initiate_measurement`` control limits.
+
+        Args:
+            station: The active Station.
+            vi: The selected measurement VI.
+            param_values: The form values (``route_<route>__<param>`` keys).
+
+        Raises:
+            CryoSoftConfigError: If the switch's route is not in a loop slot,
+                the measurement VI offers no route parameter to set, or a
+                value is invalid or outside the setup's limits.
+        """
+        qualified = self._route_qualified(station)
+        self._route_slot = next(
+            (s for s in self._loop_slots if s["qualified"] == qualified and qualified),
+            None,
+        )
+        if self._route_slot is None:
+            raise CryoSoftConfigError(
+                f"{type(self).name!r}: route settings need the switch's route "
+                f"in a reading-loop slot."
+            )
+        specs = self._route_parameter_specs(
+            self._measurement_vi, vi, (s["qualified"] for s in self._loop_slots)
+        )
+        if not specs:
+            raise CryoSoftConfigError(
+                f"{type(self).name!r}: measurement VI {self._measurement_vi!r} "
+                f"has no parameter that can be set per route."
+            )
+        bounds = vi.control_limit_bounds().get("initiate_measurement", {})
+        resolved: dict[str, dict[str, Any]] = {}
+        for route in self._route_slot["values"]:
+            settings: dict[str, Any] = {}
+            for param_name, spec in specs.items():
+                field = route_field_name(route, param_name)
+                raw = param_values.get(field)
+                if raw is None or raw == "":
+                    value = self._measurement_params[param_name]
+                else:
+                    value = self._coerce_param_value(
+                        "route settings", param_name, spec, raw
+                    )
+                lo, hi = bounds.get(param_name, (None, None))
+                if (lo is not None and value < lo) or (hi is not None and value > hi):
+                    raise CryoSoftConfigError(
+                        f"route settings: {param_name}={value!r} on route "
+                        f"{route!r} is outside the setup's limits [{lo}, {hi}]."
+                    )
+                settings[param_name] = value
+                self._params[field] = value
+            resolved[route] = settings
+        self._route_settings = resolved
+        self._params["route_settings_values"] = {
+            route: dict(settings) for route, settings in resolved.items()
+        }
+
+    def _route_change_commands(
+        self, route: str, outer_index: int
+    ) -> tuple[Command, ...]:
+        """Return the commands that connect *route* for its next reading.
+
+        Without route settings (or when *route*'s settings equal the armed
+        ones) this is the plain ``select_route``. A VI declaring a
+        ``route_setter`` gets ``select_route`` then that setter with the
+        route's values, its excitation left on. Otherwise the source is
+        switched off first: measurement ``standby``, ``select_route``, then
+        ``initiate_measurement`` with the route's values — followed by every
+        measurement-VI loop slot whose value would not be dispatched again
+        before this reading (a static slot, or a looping slot on the outer
+        axis while the route is the inner one), since re-arming reset it.
+
+        Args:
+            route: The route to connect.
+            outer_index: The current loop1 index (the in-force value of an
+                outer looping slot).
+
+        Returns:
+            The ordered commands to dispatch.
+        """
+        slot = self._route_slot
+        assert slot is not None
+        select = Command(slot["vi_name"], slot["setter"], {slot["param"]: route})
+        settings = self._route_settings.get(route)
+        if settings is None or settings == self._armed_route_settings:
+            return (select,)
+        route_setter = self._station.get_vi(self._measurement_vi).route_setter
+        if route_setter:
+            # The VI keeps its excitation on: apply the route's values to the
+            # armed instrument, no standby and no re-arm (nothing is reset).
+            self._armed_route_settings = settings
+            return (select, Command(self._measurement_vi, route_setter, dict(settings)))
+        commands = [
+            Command(self._measurement_vi, "standby", {}),
+            select,
+            Command(
+                self._measurement_vi,
+                "initiate_measurement",
+                {**self._measurement_params, **settings},
+            ),
+        ]
+        for other in self._loop_slots:
+            if other["vi_name"] != self._measurement_vi:
+                continue
+            if not other["labels"]:
+                value = other["values"][0]
+            elif other["axis"] < slot["axis"]:
+                value = other["values"][outer_index]
+            else:
+                continue
+            commands.append(
+                Command(other["vi_name"], other["setter"], {other["param"]: value})
+            )
+        self._armed_route_settings = settings
+        return tuple(commands)
+
+    @staticmethod
+    def _parse_loop_wait(slot: str, raw: Any) -> float:
+        """Return a loop slot's settle time in seconds.
+
+        Args:
+            slot: ``"loop1"`` or ``"loop2"`` (for the error message).
+            raw: The form value; ``None`` or empty means no wait.
+
+        Returns:
+            The wait in seconds, ``>= 0``.
+
+        Raises:
+            CryoSoftConfigError: If *raw* is not a finite number ``>= 0``.
+        """
+        if raw is None or raw == "":
+            return 0.0
+        try:
+            wait_s = float(raw)
+        except (TypeError, ValueError):
+            wait_s = math.nan
+        if isinstance(raw, bool) or not math.isfinite(wait_s) or wait_s < 0:
+            raise CryoSoftConfigError(
+                f"{slot}_wait_s={raw!r} must be a number of seconds >= 0."
+            )
+        return wait_s
 
     # ------------------------------------------------------------------
     # The axis column (what _axis_readback's value is stored under)
@@ -1158,34 +1424,66 @@ class SweepMeasureProcedure(BaseProcedure):
                 f"reading loop: parameter {param_name!r} is a bool and cannot "
                 f"be looped over a value list."
             )
-        values: list = []
-        for entry in (e.strip() for e in text.split(",")):
-            if not entry:
-                continue
-            try:
-                value = spec.type(entry)
-            except (TypeError, ValueError) as exc:
+        return [
+            SweepMeasureProcedure._coerce_param_value(
+                "reading loop", param_name, spec, entry
+            )
+            for entry in (e.strip() for e in text.split(","))
+            if entry
+        ]
+
+    @staticmethod
+    def _coerce_param_value(
+        context: str, param_name: str, spec: ParamSpec, raw: Any
+    ) -> Any:
+        """Convert one value with a spec's ``type`` and check it against the spec.
+
+        Shared by the reading loop's value lists and the route settings, so
+        both obey exactly the constraints the single-value form field would
+        enforce.
+
+        Args:
+            context: Error-message prefix (``"reading loop"``, ``"route settings"``).
+            param_name: The parameter's name (for error messages).
+            spec: The parameter's ``ParamSpec``.
+            raw: The value to convert (a form value or a list entry).
+
+        Returns:
+            The converted value.
+
+        Raises:
+            CryoSoftConfigError: If *raw* does not convert to the spec's type
+                or violates its ``choices`` / ``min`` / ``max``.
+        """
+        if spec.type is bool:
+            if not isinstance(raw, bool):
                 raise CryoSoftConfigError(
-                    f"reading loop: {entry!r} is not a valid "
-                    f"{spec.type.__name__} for parameter {param_name!r}."
-                ) from exc
-            if spec.choices is not None and value not in spec.choices.values():
-                raise CryoSoftConfigError(
-                    f"reading loop: {value!r} is not one of {param_name!r}'s "
-                    f"allowed choices {list(spec.choices.values())}."
+                    f"{context}: {raw!r} is not a bool for parameter {param_name!r}."
                 )
-            if spec.min is not None and value < spec.min:
-                raise CryoSoftConfigError(
-                    f"reading loop: {value!r} is below {param_name!r}'s "
-                    f"minimum {spec.min!r}."
-                )
-            if spec.max is not None and value > spec.max:
-                raise CryoSoftConfigError(
-                    f"reading loop: {value!r} is above {param_name!r}'s "
-                    f"maximum {spec.max!r}."
-                )
-            values.append(value)
-        return values
+            return raw
+        try:
+            value = spec.type(raw)
+        except (TypeError, ValueError) as exc:
+            raise CryoSoftConfigError(
+                f"{context}: {raw!r} is not a valid "
+                f"{spec.type.__name__} for parameter {param_name!r}."
+            ) from exc
+        if spec.choices is not None and value not in spec.choices.values():
+            raise CryoSoftConfigError(
+                f"{context}: {value!r} is not one of {param_name!r}'s "
+                f"allowed choices {list(spec.choices.values())}."
+            )
+        if spec.min is not None and value < spec.min:
+            raise CryoSoftConfigError(
+                f"{context}: {value!r} is below {param_name!r}'s "
+                f"minimum {spec.min!r}."
+            )
+        if spec.max is not None and value > spec.max:
+            raise CryoSoftConfigError(
+                f"{context}: {value!r} is above {param_name!r}'s "
+                f"maximum {spec.max!r}."
+            )
+        return value
 
     # ------------------------------------------------------------------
     # Parameter groups: measurement-method selection + selected VI's params
@@ -1270,6 +1568,30 @@ class SweepMeasureProcedure(BaseProcedure):
         # structural — changing any of it changes which columns the run
         # produces. Nothing loopable on this station -> no group, zero change.
         registry = cls._loopable_registry(station, selected)
+        # Route settings (see the class docstring): offered while the switch's
+        # route sits in a slot and the VI has a parameter left to set per
+        # route; their fields go in their own group, and the run-wide fields
+        # they replace leave the measurement group.
+        route_qualified = cls._route_qualified(station)
+        slot_selections = [
+            str(selections.get(f"{slot}_parameter") or "") for slot in ("loop1", "loop2")
+        ]
+        route_slot = next(
+            (
+                slot
+                for slot, qualified in zip(("loop1", "loop2"), slot_selections)
+                if route_qualified and qualified == route_qualified
+            ),
+            None,
+        )
+        route_specs = (
+            cls._route_parameter_specs(
+                selected, vi, [q for q in slot_selections if q in registry]
+            )
+            if route_slot is not None
+            else {}
+        )
+        route_settings_on = bool(route_specs) and bool(selections.get("route_settings"))
         if registry:
             loop_group_params: dict[str, ParamSpec] = {}
             slot_choices: dict[str, str] = {"Off": ""}
@@ -1298,6 +1620,16 @@ class SweepMeasureProcedure(BaseProcedure):
                 )
                 if not selected_slot:
                     continue
+                loop_group_params[f"{slot}_wait_s"] = ParamSpec(
+                    type=float,
+                    default=float(selections.get(f"{slot}_wait_s") or 0.0),
+                    unit="s",
+                    min=0.0,
+                    description=(
+                        f"Loop {ordinal} wait: settle time after each change of "
+                        f"this parameter, before reading (only when it loops)"
+                    ),
+                )
                 _vi_name, param_name, spec, _setter = registry[selected_slot]
                 if spec.choices is not None:
                     for choice_label, value in spec.choices.items():
@@ -1318,6 +1650,17 @@ class SweepMeasureProcedure(BaseProcedure):
                             "two or more loop it at every sweep point"
                         ),
                     )
+                if slot == route_slot and route_specs:
+                    loop_group_params["route_settings"] = ParamSpec(
+                        type=bool,
+                        default=route_settings_on,
+                        structural=True,
+                        description=(
+                            "Arm the measurement with its own "
+                            f"{', '.join(route_specs)} on each route; the source "
+                            "is switched off at every route change"
+                        ),
+                    )
             groups.append(
                 ParamGroup(
                     key="reading_loop",
@@ -1325,6 +1668,32 @@ class SweepMeasureProcedure(BaseProcedure):
                     params=loop_group_params,
                 )
             )
+
+        # (b2) Route settings: one field per picked route and route parameter,
+        # defaulting to the parameter's own default (a blank field means the
+        # run-wide value, which the measurement group no longer shows).
+        if route_settings_on:
+            route_spec = registry[route_qualified][2]
+            picked = [
+                value
+                for value in (route_spec.choices or {}).values()
+                if selections.get(f"{route_slot}_pick_{value}")
+            ]
+            route_group_params: dict[str, ParamSpec] = {
+                route_field_name(route, param_name): dataclasses.replace(
+                    spec, description=f"{route}: {spec.description}"
+                )
+                for route in picked
+                for param_name, spec in route_specs.items()
+            }
+            if route_group_params:
+                groups.append(
+                    ParamGroup(
+                        key="route_settings",
+                        title="Route settings",
+                        params=route_group_params,
+                    )
+                )
 
         # (c) The selected VI's own parameters. Renders active_measurement_
         # parameters, not the full measurement_parameters: the externally-
@@ -1341,6 +1710,10 @@ class SweepMeasureProcedure(BaseProcedure):
                 f"{cls.name!r}: measurement VI {selected!r} parameter(s) "
                 f"{collisions} collide with the procedure's own parameters."
             )
+        if route_settings_on:
+            vi_specs = {
+                name: spec for name, spec in vi_specs.items() if name not in route_specs
+            }
         title = station.measurement_label(selected)
         if vi.configured_externally:
             title = f"{title} — externally configured"
@@ -1653,6 +2026,10 @@ class SweepMeasureProcedure(BaseProcedure):
         """
         super().apply_probe(spec)
         vi = self._station.get_vi(self._measurement_vi)
+        for slot in self._loop_slots:
+            slot["wait_s"] = min(slot["wait_s"], spec.max_wait_s)
+        for name in ("loop1_wait_s", "loop2_wait_s"):
+            self._params[name] = min(self._params[name], spec.max_wait_s)
         capped = self._probe_cap_waits(
             vi.measurement_parameters, self._measurement_params, spec.max_wait_s
         )
@@ -1746,6 +2123,13 @@ class SweepMeasureProcedure(BaseProcedure):
             and not isinstance(self._measurement_params.get(name), bool)
         }
         per_sample_s = sum(delays.values())
+        # Loop settle times: a looping slot waits after every change of its
+        # value — axis 1 once per row, axis 2 before every reading.
+        n1, n2 = self._loop_shape
+        loop_wait_s = sum(
+            lv["wait_s"] * (n1 if lv["axis"] == 0 else n1 * n2)
+            for lv in self._loop_levels
+        )
         assumptions = [
             f"settle times are this run's declared waits: "
             f"{self._initiate_wait_s():g} s before the first point, "
@@ -1764,11 +2148,15 @@ class SweepMeasureProcedure(BaseProcedure):
                 f"{self._measurement_vi} declares no per-sample delay, so no "
                 f"measurement time is counted"
             )
+        if loop_wait_s > 0:
+            assumptions.append(
+                f"{loop_wait_s:g} s per point of reading-loop settle time"
+            )
         return StepCost(
             points=len(self._sweep),
             setup_s=float(self._initiate_wait_s()),
             settle_s=float(self._step_wait_s()),
-            measure_s=float(readings * samples * per_sample_s),
+            measure_s=float(readings * samples * per_sample_s + loop_wait_s),
             assumptions=tuple(assumptions),
         )
 
@@ -1784,9 +2172,13 @@ class SweepMeasureProcedure(BaseProcedure):
         claim_commands = self._claim_initiate_commands()
         vi = self._station.get_vi(self._measurement_vi)
         targets = self._initial_system_targets()
-        arm_command = Command(
-            self._measurement_vi, "initiate_measurement", dict(self._measurement_params)
-        )
+        # With route settings the first arm already carries the first route's
+        # values; measure() re-arms only when a later route's differ.
+        arm_params = dict(self._measurement_params)
+        if self._route_slot is not None:
+            self._armed_route_settings = self._route_settings[self._route_slot["values"][0]]
+            arm_params.update(self._armed_route_settings)
+        arm_command = Command(self._measurement_vi, "initiate_measurement", arm_params)
         # Loop-slot setup around the arm (command order is semantically
         # meaningful). Slots on OTHER VIs (e.g. the switch's route) dispatch
         # their first value BEFORE the measurement VI arms, so arming happens
@@ -1918,41 +2310,73 @@ class SweepMeasureProcedure(BaseProcedure):
                 self._data_manager.record_settings_snapshot(snapshot)
 
         n_loop1, n_loop2 = self._loop_shape
-        channel_labels = self._raw_block_channel_labels(vi)
-        keys = (
-            list(vi.measurement_data_keys)
-            + list(vi.measurement_scalar_columns)
-            + list(vi.measurement_raw_blocks)
-            + channel_labels
-        )
-        grids: dict[str, list[list[Any]]] = {
-            key: [[None] * n_loop2 for _ in range(n_loop1)] for key in keys
-        }
+        cursor = self._measure_cursor
+        if cursor is None:
+            keys = (
+                list(vi.measurement_data_keys)
+                + list(vi.measurement_scalar_columns)
+                + list(vi.measurement_raw_blocks)
+                + self._raw_block_channel_labels(vi)
+            )
+            cursor = self._measure_cursor = {
+                "grids": {
+                    key: [[None] * n_loop2 for _ in range(n_loop1)] for key in keys
+                },
+                "i1": 0,
+                "i2": 0,
+                # False until this reading's loop values have been dispatched.
+                "dispatched": False,
+                # time.monotonic() before which the reading must not be taken.
+                "ready_at": 0.0,
+            }
+        grids: dict[str, list[list[Any]]] = cursor["grids"]
 
         def _dispatch(level: dict[str, Any], value: Any) -> None:
-            self._station.send_measurement_commands(
-                (Command(level["vi_name"], level["setter"], {level["param"]: value}),)
-            )
+            if level is self._route_slot:
+                commands = self._route_change_commands(value, cursor["i1"])
+            else:
+                commands = (
+                    Command(level["vi_name"], level["setter"], {level["param"]: value}),
+                )
+            self._station.send_measurement_commands(commands)
 
         axis1 = next((lv for lv in self._loop_levels if lv["axis"] == 0), None)
         axis2 = next((lv for lv in self._loop_levels if lv["axis"] == 1), None)
 
-        for i1 in range(n_loop1):
-            if axis1 is not None:
-                _dispatch(axis1, axis1["values"][i1])
-            for i2 in range(n_loop2):
+        # One reading per pass. A loop value's settle time is waited out by
+        # returning with the cursor kept (measure_pending stays True), never
+        # by sleeping — the Orchestrator calls measure() again next tick. With
+        # no wait set this runs the whole grid in one call, as it always did.
+        while cursor["i1"] < n_loop1:
+            i1, i2 = cursor["i1"], cursor["i2"]
+            if time.monotonic() < cursor["ready_at"]:
+                return
+            if not cursor["dispatched"]:
+                wait_s = 0.0
+                if axis1 is not None and i2 == 0:
+                    _dispatch(axis1, axis1["values"][i1])
+                    wait_s += axis1["wait_s"]
                 if axis2 is not None:
                     _dispatch(axis2, axis2["values"][i2])
-                reading = vi.take_reading()
-                for key, value in reading.items():
-                    grids[key][i1][i2] = value
-                for block_name, labels in vi.measurement_raw_blocks.items():
-                    block_rows = reading[block_name]  # this reading's rows x cols
-                    for col_index, label in enumerate(labels):
-                        grids[label][i1][i2] = _nanmean(
-                            row[col_index] for row in block_rows
-                        )
+                    wait_s += axis2["wait_s"]
+                cursor["dispatched"] = True
+                if wait_s > 0:
+                    cursor["ready_at"] = time.monotonic() + wait_s
+                    continue
+            reading = vi.take_reading()
+            for key, value in reading.items():
+                grids[key][i1][i2] = value
+            for block_name, labels in vi.measurement_raw_blocks.items():
+                block_rows = reading[block_name]  # this reading's rows x cols
+                for col_index, label in enumerate(labels):
+                    grids[label][i1][i2] = _nanmean(row[col_index] for row in block_rows)
+            cursor["dispatched"] = False
+            cursor["i2"] += 1
+            if cursor["i2"] >= n_loop2:
+                cursor["i2"] = 0
+                cursor["i1"] += 1
 
+        self._measure_cursor = None
         measured_data: dict[str, Any] = dict(grids)
         if (n_loop1, n_loop2) == (1, 1):
             # No reading loop configured: a raw block skips the trivial
@@ -1963,19 +2387,33 @@ class SweepMeasureProcedure(BaseProcedure):
         measured_data[type(self).axis_data_key()] = self._axis_readback()
         self._save_datapoint(measured_data)
 
+    @property
+    def measure_pending(self) -> bool:
+        """True while a datapoint's reading grid is part-way (waiting to settle)."""
+        return self._measure_cursor is not None
+
+    @property
+    def measure_resume_in_s(self) -> float:
+        """Seconds left of the reading-loop wait in progress (0 when none)."""
+        if self._measure_cursor is None:
+            return 0.0
+        return max(0.0, self._measure_cursor["ready_at"] - time.monotonic())
+
     def standby(self) -> PhasePlan:
         """Close the data file and return the safe-parking plan.
 
         Returns:
-            A ``PhasePlan`` with ``_standby_targets()``, disarming the selected
-            measurement VI, with ``wait_s=0.0``.
+            A ``PhasePlan`` with ``_standby_targets()``, ending the selected
+            measurement VI with its ``run_end_method`` (``standby`` unless the
+            VI holds its excitation past the run), with ``wait_s=0.0``.
         """
         if self._data_manager is not None:
             self._data_manager.close()
             self._data_manager = None
+        end_method = self._station.get_vi(self._measurement_vi).run_end_method
         return PhasePlan(
             targets=self._standby_targets(),
-            commands=self._safe_off_commands(),
+            commands=self._safe_off_commands(end_method),
             wait_s=0.0,
         )
 
@@ -1987,21 +2425,27 @@ class SweepMeasureProcedure(BaseProcedure):
             dispatch, plus each participating loop VI's ``reading_safe_off``.
         """
         super().abort()
+        self._measure_cursor = None
         return self._safe_off_commands()
 
-    def _safe_off_commands(self) -> tuple[Command, ...]:
-        """Return the measurement standby command plus the loop VIs' safe-offs.
+    def _safe_off_commands(self, end_method: str = "standby") -> tuple[Command, ...]:
+        """Return the measurement end command plus the loop VIs' safe-offs.
 
-        Shared by ``standby()`` and ``abort()``: disarm the measurement VI
-        and, for every OTHER VI that took part in a loop slot (static or
-        looping) and declares a ``reading_safe_off`` method (e.g. the switch's
+        Shared by ``standby()`` and ``abort()``: end the measurement VI and,
+        for every OTHER VI that took part in a loop slot (static or looping)
+        and declares a ``reading_safe_off`` method (e.g. the switch's
         ``open_all``), dispatch it so nothing is left connected.
 
+        Args:
+            end_method: The measurement VI method to dispatch — its
+                ``run_end_method`` at a normal end, always ``"standby"`` on
+                abort.
+
         Returns:
-            Ordered ``tuple[Command, ...]`` — the measurement ``standby``
+            Ordered ``tuple[Command, ...]`` — the measurement end command
             first, then one safe-off per participating loop VI.
         """
-        commands = [Command(self._measurement_vi, "standby", {})]
+        commands = [Command(self._measurement_vi, end_method, {})]
         seen: set[str] = set()
         for slot in self._loop_slots:
             slot_vi = slot["vi_name"]

@@ -123,7 +123,7 @@ drain first; otherwise the check reports the previous occupant of the bench.
 | Driver | Verification | Refusal `code` |
 |---|---|---|
 | `keithley_6221.py` | Error queue (`:SYST:ERR?`) after output/current/compliance/range writes, after the delta programming sequence, and after both `:SOUR:DELT:ARM` and `:INIT:IMM` | the SCPI code, e.g. `-221` |
-| `keithley_2182a.py` | Error queue (`:SYST:ERR?`) after the range and continuous-initiation writes | the SCPI code, e.g. `-222` |
+| `keithley_2182a.py` | Error queue (`:SYST:ERR?`) after the range, autorange and continuous-initiation writes | the SCPI code, e.g. `-222` |
 | `lakeshore_335.py` | Status byte (`*ESR?`) after every setter | `ESR:0x<bits>` |
 | `keithley_705.py` | Explicit readback of the G2 buffer dump after every open/close | `READBACK_MISMATCH` |
 | `oxford_ilm200.py` / `oxford_ilm210.py` | ISOBUS acknowledgement on every command | `?` |
@@ -212,12 +212,14 @@ Real / sim twins are grouped; each `.py` lists its key methods and owning tests.
 - `keithley_6221.py` — `Keithley6221`: real AC/DC current source; DC
   `set_current` / `set_source_enabled` / `set_compliance` plus the full delta-mode
   SCPI sequence (`configure_and_start_delta`, `acquire_delta_readings`,
-  `stop_delta_mode`). tests: `tests/test_conformance.py`.
+  `stop_delta_mode`), and the 2182A serial-relay meter methods (`get_voltage`,
+  `set_range` / `get_range`, `set_auto_range`). tests: `tests/test_conformance.py`.
 - `sim_keithley_6221.py` — `SimKeithley6221`: same API; generates delta readings
   from a paired `SimKeithley2182A`; `_delta_return_count` hook forces short
   returns to exercise NaN-padding. tests: `tests/test_l0_simulated.py`.
 - `keithley_2182a.py` — `Keithley2182A`: real nanovoltmeter; `get_voltage`,
-  `set_range` / `get_range`. tests: `tests/test_conformance.py`.
+  `set_range` / `get_range`, `set_auto_range` (a fixed `set_range` turns
+  autorange off). tests: `tests/test_conformance.py`.
 - `sim_keithley_2182a.py` — `SimKeithley2182A`: same API; returns base voltage +
   Gaussian noise. tests: `tests/test_l0_simulated.py`.
 - `sim_keithley_2400.py` — `SimKeithley2400`: single-instrument SMU that both

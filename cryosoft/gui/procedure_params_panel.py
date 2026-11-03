@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QFormLayout,
     QFrame,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -203,6 +204,8 @@ class ProcedureParamsPanel(QWidget):
         * ``reading_loop`` — the two generic loop slots (a loopable-parameter
           drop-down each, with per-choice pick checkboxes or a value-list text
           field). See ``_build_reading_loop_box``.
+        * ``route_settings`` — the per-route arming values as a routes x
+          parameters grid. See ``_build_route_settings_box``.
 
         Any OTHER group key becomes its own generic column (so future procedures
         are not constrained by these conventions). Widget construction, labels,
@@ -268,14 +271,7 @@ class ProcedureParamsPanel(QWidget):
                 )
                 hbox.addWidget(self._build_measurement_box(group, params_group))
                 continue
-            if key == "reading_loop":
-                box = self._build_reading_loop_box(group)
-            else:
-                # System / generic columns wrap long rows too, so all four
-                # columns compress to fit the params quadrant without a
-                # horizontal scrollbar.
-                box, widgets = param_form.build_group_box(group, wrap=True)
-                self._register_group_widgets(group, widgets)
+            box = self._build_column_box(group)
             hbox.addWidget(box)
             self._group_boxes[key] = box
 
@@ -362,6 +358,74 @@ class ProcedureParamsPanel(QWidget):
         container.setLayout(form)
         self._measurement_params_container = container
         self._measurement_params_layout.addWidget(container)
+
+    def _build_column_box(self, group: ParamGroup) -> QGroupBox:
+        """Build one independent column (Reading loop, Route settings, generic).
+
+        Args:
+            group: The group to render as a column.
+
+        Returns:
+            The column's ``QGroupBox``, its inputs registered.
+        """
+        if group.key == "reading_loop":
+            return self._build_reading_loop_box(group)
+        if group.key == "route_settings":
+            return self._build_route_settings_box(group)
+        # System / generic columns wrap long rows too, so all four columns
+        # compress to fit the params quadrant without a horizontal scrollbar.
+        box, widgets = param_form.build_group_box(group, wrap=True)
+        self._register_group_widgets(group, widgets)
+        return box
+
+    def _build_route_settings_box(self, group: ParamGroup) -> QGroupBox:
+        """Build the Route settings column: a routes x parameters grid.
+
+        One header row names each route parameter (canonical name plus unit,
+        as every form label does), then one row per route: its name, then one
+        input per parameter. Each input is built by ``param_form`` and keeps
+        its namespaced ``route_<route>__<param>`` key and objectName for
+        collection and HDF5 metadata, like the reading loop's pick checkboxes.
+
+        Args:
+            group: The ``route_settings`` group.
+
+        Returns:
+            The capped-width ``QGroupBox``.
+        """
+        box = QGroupBox(group.title)
+        box.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
+        grid = QGridLayout(box)
+        grid.setSpacing(4)
+        cells: dict[str, dict[str, str]] = {}
+        for name in group.params:
+            route, param_name = name.removeprefix("route_").split("__", 1)
+            cells.setdefault(route, {})[param_name] = name
+        columns = list(dict.fromkeys(p for row in cells.values() for p in row))
+        for col, param_name in enumerate(columns, start=1):
+            spec = group.params[next(row[param_name] for row in cells.values())]
+            header = QLabel(f"{param_name} ({spec.unit})" if spec.unit else param_name)
+            header.setToolTip(spec.description)
+            grid.addWidget(header, 0, col)
+        widgets: dict[str, QWidget] = {}
+        for row_index, (route, row) in enumerate(cells.items(), start=1):
+            grid.addWidget(QLabel(f"{route}:"), row_index, 0)
+            for col, param_name in enumerate(columns, start=1):
+                name = row.get(param_name)
+                if name is None:
+                    continue
+                spec = group.params[name]
+                field = param_form.build_param_widget(name, spec)
+                field.setObjectName(f"param_{name}_input")
+                field.setToolTip(param_form.build_param_tooltip(spec))
+                if isinstance(field, QLineEdit):
+                    # Wide enough for a value like 1.0e-07 — never crushed.
+                    field.setMinimumWidth(field.fontMetrics().horizontalAdvance("0.00e-000") + 12)
+                grid.addWidget(field, row_index, col)
+                widgets[name] = field
+        grid.setRowStretch(len(cells) + 1, 1)
+        self._register_group_widgets(group, widgets)
+        return box
 
     def _build_reading_loop_box(self, group: ParamGroup) -> QGroupBox:
         """Build the Reading loop column: the two generic loop slots.
@@ -478,9 +542,20 @@ class ProcedureParamsPanel(QWidget):
         new_meas_key = next(
             (k for k in new_by_key if k.startswith("measurement:")), None
         )
-        if (
-            self._measurement_box is not None
-            and new_meas_key != self._measurement_params_key
+        # The sub-form is also rebuilt when the same VI's field set changes
+        # (route settings take the per-route parameters out of it).
+        old_meas_group = (
+            old_by_key.get(self._measurement_params_key)
+            if self._measurement_params_key is not None
+            else None
+        )
+        meas_fields_changed = (
+            new_meas_key is not None
+            and old_meas_group is not None
+            and set(old_meas_group.params) != set(new_by_key[new_meas_key].params)
+        )
+        if self._measurement_box is not None and (
+            new_meas_key != self._measurement_params_key or meas_fields_changed
         ):
             if self._measurement_params_key is not None:
                 old_group = old_by_key.get(self._measurement_params_key)
@@ -540,12 +615,7 @@ class ProcedureParamsPanel(QWidget):
         for key in new_by_key:
             if not _is_column_key(key) or key in self._group_boxes:
                 continue
-            group = new_by_key[key]
-            if key == "reading_loop":
-                box = self._build_reading_loop_box(group)
-            else:
-                box, widgets = param_form.build_group_box(group, wrap=True)
-                self._register_group_widgets(group, widgets)
+            box = self._build_column_box(new_by_key[key])
             if self._param_hbox is not None:
                 self._param_hbox.addWidget(box)
             self._group_boxes[key] = box

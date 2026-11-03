@@ -147,6 +147,16 @@ virtual_instruments:
     init_params:
       max_source_current_A: 0.105   # K6220 maximum output current (raised from 0.01, 2026-10-17)
 
+  # Spin Seebeck DC mode: same pair as keithley_dc_mode, but the heater current
+  # is held on across route changes and after a normal run end (abort,
+  # failure and EMERGENCY still zero it).
+  keithley_ss_dc_mode:
+    class: cryosoft.virtual_instruments.measurement.measurement_ss_dc_mode.SSDCModeMeasurementVI
+    drivers: {source: keithley_6220, meter: keithley_2182a}
+    vi_type: measurement
+    init_params:
+      max_source_current_A: 0.105   # K6220 maximum output current
+
   # Generic pass-through routes (ch1..ch20, one per raw 705 channel) rather
   # than fixed per-sample names: no sample-to-channel mapping is documented
   # yet, so the operator/procedure selects whichever channel is physically

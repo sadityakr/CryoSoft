@@ -616,10 +616,26 @@ def test_start_experiment_rejects_empty_dirname(manager):
         manager.start_experiment("X", "jdoe", SAMPLE_INFO, experiment_dirname="   ")
 
 
-@pytest.mark.parametrize("bad_dirname", ["a/b", "a\\b", ".", ".."])
-def test_start_experiment_rejects_separator_or_dot_dirname(manager, bad_dirname):
+@pytest.mark.parametrize("bad_dirname", [".", "..", "a/../..", "../x", "a/./b"])
+def test_start_experiment_rejects_dot_or_escaping_dirname(manager, bad_dirname):
     with pytest.raises(ValueError):
         manager.start_experiment("X", "jdoe", SAMPLE_INFO, experiment_dirname=bad_dirname)
+
+
+@pytest.mark.parametrize("nested", ["batch1/rvst", "batch1\\rvst"])
+def test_start_experiment_may_nest_inside_the_session(manager, store, nested):
+    record = manager.start_experiment("X", "jdoe", SAMPLE_INFO, experiment_dirname=nested)
+    assert record.experiment_id == "batch1/rvst"
+    assert (store.root / "batch1" / "rvst" / "experiment.json").is_file()
+    assert store.list_experiments() == ["batch1/rvst"]
+    assert store.load("batch1/rvst") == record
+
+
+def test_start_experiment_refuses_a_folder_inside_an_existing_experiment(manager):
+    manager.start_experiment("X", "jdoe", SAMPLE_INFO, experiment_dirname="outer")
+    manager.close_experiment()
+    with pytest.raises(ValueError, match="inside the experiment"):
+        manager.start_experiment("Y", "jdoe", SAMPLE_INFO, experiment_dirname="outer/inner")
 
 
 def test_start_experiment_rejects_dirname_collision(manager):
@@ -1410,6 +1426,52 @@ def test_a_chosen_session_folder_name_is_what_the_session_gets(session_store):
     assert session_store.session_dir("jdoe", "rvst_project") == (
         session_store.root / "jdoe" / "rvst_project"
     )
+
+
+def test_a_session_may_live_anywhere_under_the_sessions_folder(session_store):
+    """session_path is free: nested, and not necessarily under the owner."""
+    nested = session_store.create_session("A", "jdoe", session_path="jdoe/2026/spring/a")
+    shared = session_store.create_session("B", "jdoe", session_path="shared/batch1")
+    assert nested.session_id == "jdoe/2026/spring/a"
+    assert shared.session_id == "shared/batch1"
+    assert (session_store.root / "shared" / "batch1" / "session.json").is_file()
+    assert session_store.session_dir("jdoe", shared.session_id) == (
+        session_store.root / "shared" / "batch1"
+    )
+    assert session_store.list_sessions("jdoe") == ["jdoe/2026/spring/a", "shared/batch1"]
+    assert session_store.load("jdoe", "shared/batch1").name == "B"
+    assert session_store.locate(session_store.root / "shared" / "batch1") == (
+        "jdoe",
+        "shared/batch1",
+    )
+
+
+def test_a_session_path_directly_under_the_owner_keeps_the_bare_id(session_store):
+    session = session_store.create_session("A", "jdoe", session_path="jdoe" + chr(92) + "rvst")
+    assert session.session_id == "rvst"
+    assert session_store.list_sessions("jdoe") == ["rvst"]
+
+
+@pytest.mark.parametrize("bad", ["", "..", "a/../../x", "x/./y"])
+def test_an_escaping_session_path_is_refused(session_store, bad):
+    with pytest.raises(ValueError):
+        session_store.create_session("A", "jdoe", session_path=bad)
+
+
+def test_a_session_path_outside_or_inside_a_session_is_refused(session_store, tmp_path):
+    session_store.create_session("A", "jdoe", session_path="jdoe/a")
+    with pytest.raises(ValueError, match="already exists"):
+        session_store.create_session("B", "jdoe", session_path="jdoe/a")
+    with pytest.raises(ValueError, match="inside the session"):
+        session_store.create_session("B", "jdoe", session_path="jdoe/a/sub")
+    with pytest.raises(ValueError, match="outside"):
+        session_store.create_session("B", "jdoe", session_path=str(tmp_path / "elsewhere"))
+
+
+def test_an_absolute_session_path_inside_the_root_is_accepted(session_store):
+    target = session_store.root / "jdoe" / "deep" / "one"
+    session = session_store.create_session("A", "jdoe", session_path=str(target))
+    assert session.session_id == "jdoe/deep/one"
 
 
 @pytest.mark.parametrize(

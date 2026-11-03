@@ -366,6 +366,12 @@ class SimKeithley6221:
         if self._paired_meter is not None:
             self._paired_meter.set_range(range_v)
 
+    def set_auto_range(self, enabled: bool) -> None:
+        """Set autorange on the paired simulated meter."""
+        self._check_error()
+        if self._paired_meter is not None:
+            self._paired_meter.set_auto_range(enabled)
+
     def get_range(self) -> float:
         """Get range from the paired simulated meter."""
         self._check_error()

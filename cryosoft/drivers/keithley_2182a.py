@@ -179,6 +179,23 @@ class Keithley2182A:
         self._write(f":SENS:VOLT:CHAN1:RANG {range_v:.4e}")
         self._check_error_queue(f"set_range({range_v!r})")
 
+    def set_auto_range(self, enabled: bool) -> None:
+        """Turn channel-1 DC voltage autorange on or off.
+
+        A fixed range written by :meth:`set_range` turns autorange off on the
+        instrument itself, so a caller choosing a fixed range never needs to
+        call this with ``False`` first.
+
+        Args:
+            enabled: True for autorange, False to hold the present range.
+
+        Raises:
+            CryoSoftInstrumentError: If the 2182A queues an error for the
+                write (the driver error-reporting standard).
+        """
+        self._write(":SENS:VOLT:CHAN1:RANG:AUTO " + ("ON" if enabled else "OFF"))
+        self._check_error_queue(f"set_auto_range({enabled!r})")
+
     def get_range(self) -> float:
         """Return the current DC voltage range setting in Volts."""
         raw = self._query(":SENS:VOLT:CHAN1:RANG?")

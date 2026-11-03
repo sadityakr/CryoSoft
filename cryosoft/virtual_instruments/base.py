@@ -1767,6 +1767,45 @@ class MeasurementInstrumentBase(BaseVirtualInstrument):
       keep ``@control`` (and ``control_limits``) on setters whose values must
       be bounded.
 
+    Route settings (optional): ``route_parameters``
+    -----------------------------------------------
+    A VI may declare which of its arming parameters may take a DIFFERENT value
+    on each switch route, via the class attribute::
+
+        route_parameters: ClassVar[tuple[str, ...]] = ("current", "voltmeter_range_V")
+
+    Declaring it is all a VI does. When the switch's route is in a reading-loop
+    slot, the generic sweep procedure offers a "Route settings" switch; with it
+    on, the form shows one field per picked route and declared parameter, and
+    on every route change whose settings differ from the armed ones the
+    procedure dispatches ``standby`` (source off), ``select_route``, then
+    ``initiate_measurement`` with that route's values. ``initiate_measurement``
+    is therefore the only setter a route parameter needs.
+
+    A VI whose excitation must stay on across route changes (a heater
+    holding a thermal gradient, say) also names a ``route_setter``: a method
+    taking the route parameters as keyword arguments that applies one
+    route's values to the ARMED instrument. The procedure then dispatches
+    ``select_route`` followed by that method — no ``standby``, no re-arm.
+
+    Contract (machine-enforced by ``tests/test_conformance.py``):
+
+    * Every name is an existing ``measurement_parameters`` entry.
+    * A route parameter reconfigures the reading, never its shape: it never
+      changes ``data_arrays(params)`` (so ``n_readings`` can never be one).
+    * A ``route_setter``, when declared, is a ``@control`` method accepting
+      every route parameter as a keyword argument.
+
+    Run end (optional): ``run_end_method``
+    --------------------------------------
+    The method the procedure dispatches when a run ENDS NORMALLY; the
+    default ``"standby"`` switches the excitation off. A VI whose excitation
+    must outlive the run names another argument-less method (e.g. ``disarm``,
+    which ends the measurement and leaves the source on). Abort, run failure
+    and EMERGENCY always dispatch ``standby`` regardless — a held excitation
+    never survives them. Machine-enforced: the name is a real method callable
+    with no arguments.
+
     Adding a new measurement method: subclass this base (or ``DCMeasurementBase``
     for a DC-resistance method), declare the three class attributes, and
     implement ``data_arrays`` / ``initiate_measurement`` / ``take_reading`` /
@@ -1792,6 +1831,16 @@ class MeasurementInstrumentBase(BaseVirtualInstrument):
     # Reading-loop declaration: parameter name -> per-reading setter method.
     # Empty (the default) means no parameter of this VI can be looped.
     reading_setters: ClassVar[dict[str, str]] = {}
+    # Route settings declaration: the arming parameters that may differ per
+    # switch route (see the class docstring's "Route settings" section).
+    # Empty (the default) means one setting for every route.
+    route_parameters: ClassVar[tuple[str, ...]] = ()
+    # The method applying one route's values to the armed instrument, or ""
+    # (the default) to re-arm with the source switched off at each change.
+    route_setter: ClassVar[str] = ""
+    # The method dispatched at a normal run end (see the class docstring's
+    # "Run end" section); abort, failure and EMERGENCY always use standby.
+    run_end_method: ClassVar[str] = "standby"
     # The externally-configured standard's self-description (see the class
     # docstring's "Externally configured instruments" section): the
     # measurement_parameters names the external tool owns when
@@ -1965,6 +2014,27 @@ class MeasurementInstrumentBase(BaseVirtualInstrument):
         return {
             name: self.measurement_parameters[name]
             for name in self.reading_setters
+            if name not in owned
+        }
+
+    @property
+    def active_route_parameters(self) -> dict[str, ParamSpec]:
+        """Return the ``ParamSpec`` of every parameter a route may set itself.
+
+        Read from ``measurement_parameters`` like ``reading_parameters``, and
+        for the same reason minus any externally-owned name while
+        ``configured_externally`` is true: the procedure must never re-arm a
+        parameter the external tool owns.
+
+        Returns:
+            ``{name: measurement_parameters[name]}`` for every
+            ``route_parameters`` name, in declaration order, minus any
+            externally-owned name while ``configured_externally`` is true.
+        """
+        owned = self.externally_owned_parameters if self._configured_externally else frozenset()
+        return {
+            name: self.measurement_parameters[name]
+            for name in self.route_parameters
             if name not in owned
         }
 

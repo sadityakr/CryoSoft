@@ -5,9 +5,10 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
-from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -19,6 +20,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QSizePolicy,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -472,11 +474,12 @@ class EnvelopeEditorWidget(QGroupBox):
 class StartExperimentDialog(QDialog):
     """Collect a title, user, attendance flag, and folder name to open a new experiment.
 
-    The folder name field lets the operator override the experiment's
-    directory name (always directly under the active session — flat, no
-    nesting); left alone, it auto-fills from the title the same way
-    ``AddUserDialog``'s id field auto-fills from the name, and stops
-    auto-filling the moment the operator types in it by hand.
+    The "Saved in" field is the experiment's folder, editable, as a path
+    inside the active session (sub-folders allowed, e.g. ``batch1/rvst``);
+    left alone, it auto-fills from the title the same way ``AddUserDialog``'s
+    id field auto-fills from the name, and stops auto-filling the moment the
+    operator types in it by hand. When the caller passes *session_root* the
+    resolved full path is shown beneath it.
 
     When the caller supplies *envelope_variables* the dialog also carries an
     ``EnvelopeEditorWidget``, so the experiment's sample bounds are set where
@@ -490,6 +493,8 @@ class StartExperimentDialog(QDialog):
             ``ExperimentManager.envelope_variables()``). ``None`` or empty
             leaves the envelope editor out entirely, which is what a caller
             with no station wired — a unit test, say — gets.
+        session_root: The active session's folder, to show the experiment's
+            full path. ``None`` shows only the relative path.
     """
 
     def __init__(
@@ -497,10 +502,12 @@ class StartExperimentDialog(QDialog):
         roster: UserRoster,
         parent: QWidget | None = None,
         envelope_variables: Mapping[str, Mapping[str, Any]] | None = None,
+        session_root: Path | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Start Experiment")
         self._dirname_edited_by_hand = False
+        self._session_root = session_root
 
         form = QFormLayout()
 
@@ -515,11 +522,25 @@ class StartExperimentDialog(QDialog):
         self._dirname_input.setObjectName("experiment_dirname_input")
         self._dirname_input.setPlaceholderText("auto (from title)")
         self._dirname_input.setToolTip(
-            "Optional — override where this experiment's folder lives inside "
-            "the active session. Defaults to a name derived from the title."
+            "Where this experiment's folder lives inside the active session. "
+            "Sub-folders are allowed, e.g. batch1/rvst. Defaults to a name "
+            "derived from the title."
         )
         self._dirname_input.textEdited.connect(self._on_dirname_edited)
-        form.addRow("Folder name:", self._dirname_input)
+        self._dirname_input.textChanged.connect(self._update_full_path)
+        form.addRow("Saved in:", self._dirname_input)
+
+        self._full_path_label = QLabel()
+        self._full_path_label.setObjectName("experiment_full_path_label")
+        self._full_path_label.setProperty("class", "secondary_label")
+        self._full_path_label.setWordWrap(True)
+        self._full_path_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        self._full_path_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        form.addRow("Full path:", self._full_path_label)
 
         self._user_picker = UserPickerWidget(roster)
         self._user_picker.selection_changed_signal().connect(self._update_ok_enabled)
@@ -557,6 +578,14 @@ class StartExperimentDialog(QDialog):
 
     def _on_dirname_edited(self, _text: str) -> None:
         self._dirname_edited_by_hand = True
+
+    def _update_full_path(self, text: str) -> None:
+        """Show where the typed folder resolves to inside the session."""
+        relative = text.strip()
+        if self._session_root is None:
+            self._full_path_label.setText(relative)
+        else:
+            self._full_path_label.setText(str(self._session_root / relative))
 
     def _update_ok_enabled(self) -> None:
         envelope_ok = (

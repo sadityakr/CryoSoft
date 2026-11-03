@@ -18,6 +18,7 @@ import functools
 import inspect
 import json
 import logging
+import math
 from dataclasses import replace
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -26,7 +27,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-from PyQt6.QtCore import QObject, QTimer, pyqtSignal
+from PyQt6.QtCore import QObject, Qt, QTimer, pyqtSignal
 
 from cryosoft.core import events as ev
 from cryosoft.core.availability import TAG_POLICY, Availability
@@ -784,6 +785,13 @@ class Orchestrator(QObject):
         self._timer.setInterval(tick_interval_ms)
         self._timer.timeout.connect(self._tick)
         self._timer.start()
+        # One-shot that resumes a part-finished datapoint at its reading-loop
+        # wait's deadline, between ticks (see _run_measure_step). Cancelled by
+        # every state change.
+        self._measure_timer = QTimer(self)
+        self._measure_timer.setSingleShot(True)
+        self._measure_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._measure_timer.timeout.connect(self._resume_measure)
 
         # The static half of the picture, if the Station declares one: emitted
         # once here and again after every connect/disconnect.
@@ -1198,6 +1206,7 @@ class Orchestrator(QObject):
         Idempotent.
         """
         self._timer.stop()
+        self._measure_timer.stop()
         logger.info("Orchestrator shut down — tick timer stopped")
 
     # ------------------------------------------------------------------
@@ -3174,6 +3183,7 @@ class Orchestrator(QObject):
         """
         previous = self._state
         logger.info("Orchestrator state: %s -> %s", previous.name, new_state.name)
+        self._measure_timer.stop()
         self._state = new_state
         self._state_entered_at = time.time()
         self.state_changed.emit(self._state.value)
@@ -3854,6 +3864,27 @@ class Orchestrator(QObject):
         except Exception:  # noqa: BLE001
             return "Measuring"
 
+    def _tick_would_disturb_wait(self) -> bool:
+        """Whether this tick must be skipped to keep a reading-loop wait exact.
+
+        A tick polls every instrument for the monitor, which takes time on
+        the one hardware thread and would stretch a wait that ends before the
+        next tick could. While a datapoint is waiting, a tick therefore runs
+        only if more than one tick period of the wait would still be left;
+        otherwise it is skipped entirely (no monitor update, no safety poll)
+        and ``_measure_timer`` resumes ``measure()`` at the deadline. A wait
+        shorter than the tick period thus sees no tick at all.
+
+        Returns:
+            True to skip this tick.
+        """
+        if self._state != OrchestratorState.MEASURING or not self._procedure:
+            return False
+        if not getattr(self._procedure, "measure_pending", False):
+            return False
+        remaining_s = float(getattr(self._procedure, "measure_resume_in_s", 0.0))
+        return remaining_s <= self._timer.interval() / 1000.0
+
     def _tick(self) -> None:
         """One cooperative cycle, inside the exception boundary.
 
@@ -3861,6 +3892,8 @@ class Orchestrator(QObject):
         that would mean dying with the magnet mid-ramp and the data file
         open. Anything unexpected instead cleans up and degrades to ERROR.
         """
+        if self._tick_would_disturb_wait():
+            return
         try:
             self._tick_body()
         except Exception as exc:  # noqa: BLE001 — boundary must be broad
@@ -3913,6 +3946,67 @@ class Orchestrator(QObject):
                 continue
             if request.command is not None:
                 self.submit(request.command)
+
+    def _resume_measure(self) -> None:
+        """Resume a datapoint at its wait's deadline, inside the tick's exception boundary."""
+        if self._state != OrchestratorState.MEASURING:
+            return
+        try:
+            self._run_measure_step()
+        except Exception as exc:  # noqa: BLE001 — boundary must be broad
+            logger.exception("Unhandled exception resuming measure()")
+            self._fail_to_error(f"Internal error: {exc}")
+
+    def _run_measure_step(self) -> None:
+        """Call the procedure's ``measure()`` and, once the datapoint is whole, move on.
+
+        Shared by the tick and by ``_measure_timer`` (the reading-loop wait's
+        deadline), so a settle time is honoured to the millisecond instead of
+        being rounded up to the next tick. It touches nothing the tick owns
+        (no instrument poll, no ramp step), so calling it between ticks does
+        not change any rate.
+        """
+        if not self._procedure:
+            self._change_state(OrchestratorState.SWEEPING)
+            return
+        is_operation = self._is_operation_active()
+        self._emit_status(self._measure_status_line())
+        self._procedure.measure()
+        if getattr(self._procedure, "measure_pending", False):
+            # A datapoint part-way through a reading-loop settle time stays
+            # in MEASURING and nothing is announced or stepped until it
+            # completes. measure() is called again at the wait's own
+            # deadline (not the next tick, which would round it up to the
+            # tick period); the tick still calls it too, harmlessly early.
+            delay_s = float(getattr(self._procedure, "measure_resume_in_s", 0.0))
+            self._measure_timer.start(max(1, math.ceil(delay_s * 1000)))
+        else:
+            if hasattr(self._procedure, "get_progress"):
+                progress = self._procedure.get_progress()
+                if is_operation:
+                    self.operation_progress.emit(progress)
+                else:
+                    self.procedure_progress.emit(progress)
+            # measurement_ready is PROCEDURE-EXCLUSIVE (the hard
+            # status separation) — an operation's sample() has no
+            # equivalent GUI consumer today (the fill curve is an
+            # internal detail until phase 4 moves it to the cryogenics
+            # log), so it is withheld even if a future operation grows a
+            # last_datapoint attribute.
+            last_datapoint = getattr(self._procedure, "last_datapoint", None)
+            if last_datapoint and not is_operation:
+                self.measurement_ready.emit(dict(last_datapoint))
+                manifest = self._active_run_manifest or {}
+                self._emit_event(
+                    ev.Datapoint(
+                        run_id=str(manifest.get("run_id", "")),
+                        index=self._datapoint_index,
+                        values=_json_safe(last_datapoint),
+                        seq=self._next_seq(),
+                    )
+                )
+                self._datapoint_index += 1
+            self._change_state(OrchestratorState.SWEEPING)
 
     def _tick_body(self) -> None:
         # Fresh tick: whatever ramp snapshot the last one memoised is stale.
@@ -4254,36 +4348,7 @@ class Orchestrator(QObject):
             # rate just because two ticks of every measurement cycle are
             # spent in states that historically never saw a live ramp.
             self._station.advance_ramps()
-            if self._procedure:
-                is_operation = self._is_operation_active()
-                self._emit_status(self._measure_status_line())
-                self._procedure.measure()
-                if hasattr(self._procedure, "get_progress"):
-                    progress = self._procedure.get_progress()
-                    if is_operation:
-                        self.operation_progress.emit(progress)
-                    else:
-                        self.procedure_progress.emit(progress)
-                # measurement_ready is PROCEDURE-EXCLUSIVE (the hard
-                # status separation) — an operation's sample() has no
-                # equivalent GUI consumer today (the fill curve is an
-                # internal detail until phase 4 moves it to the cryogenics
-                # log), so it is withheld even if a future operation grows a
-                # last_datapoint attribute.
-                last_datapoint = getattr(self._procedure, "last_datapoint", None)
-                if last_datapoint and not is_operation:
-                    self.measurement_ready.emit(dict(last_datapoint))
-                    manifest = self._active_run_manifest or {}
-                    self._emit_event(
-                        ev.Datapoint(
-                            run_id=str(manifest.get("run_id", "")),
-                            index=self._datapoint_index,
-                            values=_json_safe(last_datapoint),
-                            seq=self._next_seq(),
-                        )
-                    )
-                    self._datapoint_index += 1
-            self._change_state(OrchestratorState.SWEEPING)
+            self._run_measure_step()
         elif self._state == OrchestratorState.SWEEPING:
             self._station.advance_ramps()  # see MEASURING above
             if self._pause_requested:

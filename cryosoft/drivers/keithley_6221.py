@@ -672,6 +672,25 @@ class Keithley6221:
         time.sleep(0.15)
         self._check_error_queue(f"set_range({range_v!r})")
 
+    def set_auto_range(self, enabled: bool) -> None:
+        """Turn the 2182A's channel-1 autorange on or off via the serial relay.
+
+        A fixed range written by :meth:`set_range` turns autorange off on the
+        2182A itself.
+
+        Args:
+            enabled: True for autorange, False to hold the present range.
+
+        Raises:
+            CryoSoftInstrumentError: If the 6221 queues an error for the
+                relay write (same one-way caveat as :meth:`set_range`).
+        """
+        self._ensure_serial_relay_configured()
+        state = "ON" if enabled else "OFF"
+        self._write(f':SYST:COMM:SER:SEND ":SENS1:VOLT:RANG:AUTO {state}"')
+        time.sleep(0.15)
+        self._check_error_queue(f"set_auto_range({enabled!r})")
+
     def get_range(self) -> float:
         """Return the current 2182A voltage range via the serial relay."""
         self._ensure_serial_relay_configured()

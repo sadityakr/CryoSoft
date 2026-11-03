@@ -529,6 +529,26 @@ class TestSimKeithley2182A:
         d.set_range(1.0)
         assert d.get_range() == pytest.approx(1.0)
 
+    def test_auto_range_is_cleared_by_a_fixed_range(self):
+        """As on the instrument, writing a fixed range turns autorange off."""
+        from cryosoft.drivers.sim_keithley_2182a import SimKeithley2182A
+
+        d = SimKeithley2182A("SIM")
+        d.set_auto_range(True)
+        assert d._auto_range is True
+        d.set_range(0.1)
+        assert d._auto_range is False
+
+    def test_auto_range_reaches_the_meter_through_the_6221_relay(self):
+        """The 6221's relay set_auto_range forwards to the paired meter."""
+        from cryosoft.drivers.sim_keithley_2182a import SimKeithley2182A
+        from cryosoft.drivers.sim_keithley_6221 import SimKeithley6221
+
+        source = SimKeithley6221("SIM")
+        source._paired_meter = SimKeithley2182A("SIM")
+        source.set_auto_range(True)
+        assert source._paired_meter._auto_range is True
+
     def test_voltage_has_noise(self):
         """Multiple voltage readings differ due to Gaussian noise."""
         from cryosoft.drivers.sim_keithley_2182a import SimKeithley2182A

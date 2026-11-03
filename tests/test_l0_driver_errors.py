@@ -162,6 +162,21 @@ def test_keithley_2182a_real_raises_typed_error_from_the_scpi_queue():
     assert excinfo.value.instrument_message == "Parameter data out of range"
 
 
+def test_keithley_2182a_real_set_auto_range_writes_and_checks_the_queue():
+    """Autorange is the channel-1 RANG:AUTO write, and a refusal is surfaced."""
+    from cryosoft.drivers.keithley_2182a import Keithley2182A
+
+    driver = _fake_visa_driver(Keithley2182A, ['0,"No error"'])
+    driver.set_auto_range(True)
+    driver._instr.write.assert_any_call(":SENS:VOLT:CHAN1:RANG:AUTO ON")
+
+    driver = _fake_visa_driver(Keithley2182A, ['-221,"Settings conflict"'])
+    with pytest.raises(CryoSoftInstrumentError) as excinfo:
+        driver.set_auto_range(False)
+    assert excinfo.value.code == "-221"
+    assert "set_auto_range" in excinfo.value.context
+
+
 def test_keithley_2182a_real_does_not_charge_a_stale_queue_to_the_arming_write():
     """A ``-213`` left by a free-running meter is not blamed on ``:INIT:CONT OFF``.
 

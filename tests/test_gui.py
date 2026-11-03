@@ -1234,7 +1234,9 @@ def test_generic_field_sweep_renders_measurement_select_and_default_group(proced
     _select_procedure(procedure_win, FieldSweep.name)
 
     combo = _measurement_combo(procedure_win)
-    assert combo.count() == 4  # keithley_delta_mode + keithley_dc_mode + dc_measurement + lockin_harmonic
+    # keithley_delta_mode + keithley_dc_mode + keithley_ss_dc_mode + dc_measurement
+    # + lockin_harmonic
+    assert combo.count() == 5
     # The default VI's params render (delta-mode).
     assert procedure_win.findChild(QComboBox, "param_voltmeter_range_V_input") is not None
     assert procedure_win.findChild(QLineEdit, "param_n_readings_input") is not None
@@ -1384,6 +1386,50 @@ def test_generic_field_sweep_collect_returns_pick_bools(procedure_win, station):
     assert values["loop1_pick_Mux-Ch4"] is False
 
 
+def test_route_settings_column_replaces_run_wide_fields(procedure_win, station):
+    """Route settings on: a per-route column appears, the run-wide fields go.
+
+    The column is a routes x parameters grid whose inputs are collected under
+    their namespaced route_<route>__<param> keys, and switching it off
+    restores the run-wide fields in the Measurement column.
+    """
+    from cryosoft.procedures.field_sweep import FieldSweep
+
+    station.set_scanner_enabled(True)
+    procedure_win._params_panel.select_procedure_by_name(FieldSweep.name)
+    _select_measurement(procedure_win, "keithley_dc_mode")
+    _set_slot_parameter(procedure_win, "loop1_parameter", "switch_matrix.route")
+    procedure_win.findChild(QCheckBox, "param_loop1_pick_Mux-Ch1_input").setChecked(True)
+    procedure_win.findChild(QCheckBox, "param_loop1_pick_Mux-Ch2_input").setChecked(True)
+    toggle = procedure_win.findChild(QCheckBox, "param_route_settings_input")
+    assert toggle is not None
+    assert procedure_win.findChild(QLineEdit, "param_current_input") is not None
+
+    toggle.setChecked(True)
+
+    panel = procedure_win._params_panel
+    assert "route_settings" in panel._group_boxes
+    assert procedure_win.findChild(QLineEdit, "param_current_input") is None
+    field = procedure_win.findChild(QLineEdit, "param_route_Mux-Ch2__current_input")
+    assert field is not None
+    labels = {lbl.text() for lbl in panel._group_boxes["route_settings"].findChildren(QLabel)}
+    assert {"Mux-Ch1:", "Mux-Ch2:", "current (A)", "compliance_V (V)"} <= labels
+    range_combo = procedure_win.findChild(
+        QComboBox, "param_route_Mux-Ch2__voltmeter_range_V_input"
+    )
+    range_combo.setCurrentText("Auto")
+    field.setText("1e-7")
+
+    values, *_ = procedure_win._collect_params()
+    assert values["route_settings"] is True
+    assert values["route_Mux-Ch2__current"] == pytest.approx(1e-7)
+    assert values["route_Mux-Ch2__voltmeter_range_V"] == 0.0
+
+    toggle.setChecked(False)
+    assert "route_settings" not in panel._group_boxes
+    assert procedure_win.findChild(QLineEdit, "param_current_input") is not None
+
+
 def test_generic_field_sweep_method_combo_shows_selector_labels(procedure_win, station):
     """The method drop-down shows the SHORT selector_labels, vi_name in a tooltip.
 
@@ -1403,7 +1449,8 @@ def test_generic_field_sweep_method_combo_shows_selector_labels(procedure_win, s
     ]
     assert items == expected
     assert items == [
-        "Delta mode (6221 + 2182A)", "DC mode (6221 + 2182A)", "DC (6221 + 2182A)", "Lock-in 1f/2f (internal source)",
+        "Delta mode (6221 + 2182A)", "DC mode (6221 + 2182A)", "SS DC mode (6221 + 2182A)",
+        "DC (6221 + 2182A)", "Lock-in 1f/2f (internal source)",
     ]
 
     # Each item carries its vi_name as a tooltip (disambiguation).
@@ -1668,7 +1715,7 @@ def _stub_start_dialog(
     monkeypatch.setattr(
         sip,
         "StartExperimentDialog",
-        lambda roster, parent=None, envelope_variables=None: _FakeStartDialog(
+        lambda roster, parent=None, envelope_variables=None, session_root=None: _FakeStartDialog(
             (title, user_id, attended, dirname), envelope
         ),
     )
@@ -1702,13 +1749,21 @@ def test_experiment_row_enabled_with_session_manager(monitor_win_session):
 
 def test_start_experiment_updates_panel_and_manager(monitor_win_session, session_manager, monkeypatch):
     """Clicking Start Experiment opens the dialog and installs the experiment."""
-    _stub_start_dialog(monkeypatch, "Hall bar A3", "jdoe", attended=True)
+    _stub_start_dialog(
+        monkeypatch, "Hall bar A3", "jdoe", attended=True, dirname="batch1/hall_bar"
+    )
     panel = monitor_win_session._session_info
 
+    assert panel._experiment_path_label.isHidden()
     panel._start_close_btn.click()
 
     experiment = session_manager.current_experiment()
     assert experiment is not None
+    assert experiment.experiment_id == "batch1/hall_bar"
+    assert not panel._experiment_path_label.isHidden()
+    assert str(session_manager.store.root / "batch1" / "hall_bar") in (
+        panel._experiment_path_label.text()
+    )
     assert experiment.title == "Hall bar A3"
     assert experiment.user_id == "jdoe"
     assert panel._start_close_btn.text() == "Close Experiment…"
@@ -1859,7 +1914,7 @@ def test_start_experiment_with_invalid_dirname_shows_warning_and_stays_closed(
     monitor_win_session, session_manager, monkeypatch
 ):
     """A dirname the manager rejects surfaces as a warning, same as any other ValueError."""
-    _stub_start_dialog(monkeypatch, "Hall bar A3", "jdoe", dirname="a/b")
+    _stub_start_dialog(monkeypatch, "Hall bar A3", "jdoe", dirname="a/../../b")
     warned = []
     monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a))
     panel = monitor_win_session._session_info
@@ -2003,7 +2058,7 @@ def test_start_dialog_is_offered_the_setups_envelope_variables(
 
     from cryosoft.gui import experiment_info_panel as sip
 
-    def _capture(roster, parent=None, envelope_variables=None):
+    def _capture(roster, parent=None, envelope_variables=None, session_root=None):
         seen.append(envelope_variables)
         return _FakeStartDialog(("Hall bar A3", "jdoe", True, None))
 
@@ -4594,10 +4649,12 @@ def test_new_session_shows_the_folder_it_would_occupy(qtbot, tmp_path):
     dialog = ResumeSessionDialog(store, "jdoe")
     qtbot.addWidget(dialog)
 
-    dialog._new_dirname_input.setText("rvst_project")
+    dialog._new_dirname_input.setText("jdoe/rvst_project")
     assert dialog._path_label.text() == str(
         store.session_dir("jdoe", "rvst_project")
     )
+    dialog._new_dirname_input.setText("shared/2026/rvst")
+    assert dialog._path_label.text() == str(store.root / "shared" / "2026" / "rvst")
 
 
 def test_new_session_refuses_a_colliding_folder_inline(qtbot, tmp_path):
@@ -4611,7 +4668,7 @@ def test_new_session_refuses_a_colliding_folder_inline(qtbot, tmp_path):
     qtbot.addWidget(dialog)
 
     dialog._new_name_input.setText("Another go")
-    dialog._new_dirname_input.setText("rvst")
+    dialog._new_dirname_input.setText("jdoe/rvst")
 
     assert not dialog._create_btn.isEnabled()
     # isHidden(), not isVisible(): the dialog itself is never shown here, and
@@ -4630,12 +4687,60 @@ def test_new_session_is_created_in_the_chosen_folder(qtbot, tmp_path):
     qtbot.addWidget(dialog)
 
     dialog._new_name_input.setText("R vs T")
-    dialog._new_dirname_input.setText("rvst_project")
-    dialog._on_dirname_edited("rvst_project")
+    dialog._new_dirname_input.setText("jdoe/rvst_project")
+    dialog._on_dirname_edited("jdoe/rvst_project")
     dialog._create_btn.click()
 
     assert store.list_sessions("jdoe") == ["rvst_project"]
     assert dialog.selected_session_id() == "rvst_project"
+
+
+def test_new_session_can_be_created_anywhere_under_the_sessions_folder(qtbot, tmp_path):
+    """The path is free: nested, and not necessarily under the owner's folder."""
+    from cryosoft.gui.session_dialogs import ResumeSessionDialog
+    from cryosoft.session.store import SessionStore
+
+    store = SessionStore(tmp_path / "sessions")
+    dialog = ResumeSessionDialog(store, "jdoe")
+    qtbot.addWidget(dialog)
+
+    dialog._new_name_input.setText("R vs T")
+    dialog._new_dirname_input.setText("shared/2026/rvst")
+    assert dialog._create_btn.isEnabled()
+    dialog._create_btn.click()
+
+    assert (tmp_path / "sessions" / "shared" / "2026" / "rvst" / "session.json").is_file()
+    assert dialog.selected_session() == ("jdoe", "shared/2026/rvst")
+
+
+def test_new_session_refuses_a_path_outside_the_sessions_folder(qtbot, tmp_path):
+    from cryosoft.gui.session_dialogs import ResumeSessionDialog
+    from cryosoft.session.store import SessionStore
+
+    store = SessionStore(tmp_path / "sessions")
+    dialog = ResumeSessionDialog(store, "jdoe")
+    qtbot.addWidget(dialog)
+
+    dialog._new_name_input.setText("R vs T")
+    dialog._new_dirname_input.setText("../escape")
+
+    assert not dialog._create_btn.isEnabled()
+    assert "'..'" in dialog._error_label.text()
+
+
+def test_start_experiment_dialog_shows_the_full_path_inside_the_session(qtbot, tmp_path):
+    from cryosoft.gui.experiment_dialogs import StartExperimentDialog
+
+    session_root = tmp_path / "sessions" / "jdoe" / "rvst"
+    dialog = StartExperimentDialog(
+        _start_dialog_roster(tmp_path), session_root=session_root
+    )
+    qtbot.addWidget(dialog)
+
+    dialog._dirname_input.setText("batch1/hall_bar")
+
+    assert dialog._full_path_label.text() == str(session_root / "batch1/hall_bar")
+    assert dialog.result_values()[3] == "batch1/hall_bar"
 
 
 def test_logging_in_moves_the_active_session_to_that_users_own(

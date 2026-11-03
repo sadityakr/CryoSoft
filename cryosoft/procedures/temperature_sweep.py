@@ -22,16 +22,16 @@ class TemperatureSweep(SweepMeasureProcedure):
     no new code.
 
     Procedure flow:
-    1. ``initiate()``: ramp ``temperature_vti`` (and, when enabled,
-       ``temperature_sample``) to the first temperature at
-       ``ramp_rate_K_per_min``, ramp ``magnet_z`` to its held field, arm the
-       selected measurement VI.
-    2. ``measure()``: read the VI, tag on the temperature read-back, save.
+    1. ``initiate()``: ramp ``temperature_sample`` and ``temperature_vti`` (each
+       when enabled) to the first temperature at ``ramp_rate_K_per_min``, ramp
+       ``magnet_z`` to its held field, arm the selected measurement VI.
+    2. ``measure()``: read the VI, tag on the sample-temperature read-back, save.
     3. ``change_sweep_step()``: ramp both temperature channels to the next step.
     4. ``standby()``: close the data file; temperature holds at the last point.
 
-    The sample stage follows the sweep: its setpoint at every point is the swept
-    temperature plus ``sample_offset``. The ramp rate is passed per-step via
+    The swept axis is the SAMPLE temperature — the actual temperature the
+    measurement is taken at. The VTI runs colder than it by ``vti_offset``: its
+    setpoint at every point is the swept temperature minus ``vti_offset``. The ramp rate is passed per-step via
     each temperature ``Target``, so it takes effect immediately at each step
     without a YAML config change. After each point settles the procedure waits
     ``dwell_time`` seconds before measuring.
@@ -40,7 +40,8 @@ class TemperatureSweep(SweepMeasureProcedure):
         ``temperature_vti`` (system) and at least one measurement VI.
         ``magnet_z`` is optional — used when present; a nonzero field on a
         missing magnet is refused at construction. ``temperature_sample`` is
-        required only when ``set_sample_temperature`` is on.
+        required only when ``set_sample_temperature`` is on; the recorded axis
+        value is its read-back when the station has it, else the VTI's.
     """
 
     name = "Temperature Sweep"
@@ -49,7 +50,7 @@ class TemperatureSweep(SweepMeasureProcedure):
         key="temperature",
         unit="K",
         data_key="temperature_K",
-        description="VTI temperature",
+        description="Sample temperature",
         default_start=10.0,
         default_end=300.0,
         default_steps=30,
@@ -74,25 +75,22 @@ class TemperatureSweep(SweepMeasureProcedure):
             type=bool,
             default=True,
             description=(
-                "Set the VTI temperature (the swept axis). Off = measure at each "
-                "sweep point without commanding the VTI, e.g. following a passive drift"
+                "Set the VTI temperature, at 'vti_offset' below the swept sample "
+                "temperature. Off = leave the VTI alone, e.g. following a passive drift"
             ),
         ),
         "set_sample_temperature": ParamSpec(
             type=bool,
             default=False,
-            description=(
-                "Also control the sample-stage temperature, following the sweep "
-                "at 'sample_offset' from the swept temperature"
-            ),
+            description="Set the sample-stage temperature (the swept axis) at each point",
         ),
-        "sample_offset": ParamSpec(
+        "vti_offset": ParamSpec(
             type=float,
             default=0.0,
             unit="K",
             description=(
-                "Sample setpoint minus swept temperature "
-                "(ignored when 'set_sample_temperature' is off)"
+                "How far the VTI setpoint sits below the sample temperature "
+                "(ignored when 'set_vti_temperature' is off)"
             ),
         ),
         "dwell_time": ParamSpec(
@@ -150,8 +148,8 @@ class TemperatureSweep(SweepMeasureProcedure):
     def _sweep_targets(self, index: int) -> dict[str, Target]:
         """Build the temperature targets at *index*, honouring the on/off toggles.
 
-        The VTI goes to the swept value; the sample stage, when enabled, goes to
-        the swept value plus ``sample_offset``. Both carry the sweep rate. With
+        The sample stage goes to the swept value; the VTI, when enabled, goes to
+        the swept value minus ``vti_offset``. Both carry the sweep rate. With
         both toggles off the dict is empty: the Orchestrator never ramps either
         controller and the sweep measures whatever temperature the cryostat
         happens to be at (the read-back still records the true value).
@@ -160,11 +158,11 @@ class TemperatureSweep(SweepMeasureProcedure):
         rate = self._params["ramp_rate_K_per_min"]
         targets: dict[str, Target] = {}
         if self._params["set_vti_temperature"]:
-            targets["temperature_vti"] = Target(value, rate=rate)
-        if self._params["set_sample_temperature"]:
-            targets["temperature_sample"] = Target(
-                value + self._params["sample_offset"], rate=rate
+            targets["temperature_vti"] = Target(
+                value - self._params["vti_offset"], rate=rate
             )
+        if self._params["set_sample_temperature"]:
+            targets["temperature_sample"] = Target(value, rate=rate)
         return targets
 
     def _initial_system_targets(self) -> dict[str, Target]:
@@ -183,8 +181,10 @@ class TemperatureSweep(SweepMeasureProcedure):
         return {}
 
     def _axis_readback(self) -> float:
-        """Read the current temperature from ``temperature_vti``."""
-        return self._station.temperature_vti.temperature()
+        """Read the actual sample temperature (the VTI's when there is no sample VI)."""
+        has_sample = self._station.has_vi("temperature_sample")
+        vi_name = "temperature_sample" if has_sample else "temperature_vti"
+        return self._station.get_vi(vi_name).temperature()
 
     def _initiate_wait_s(self) -> float:
         """Dwell after the initial ramp (``dwell_time``)."""
