@@ -1221,6 +1221,54 @@ class Station:
             )
         )
 
+    def record_measurement_fault(self, vi_name: str, flag: str, message: str) -> None:
+        """Record *vi_name*'s last measurement fault as an advisory condition.
+
+        The producer side of the System-Condition standard's
+        ``"measurement"`` origin (GLOSSARY.md's **Measurement fault**). The
+        run the fault ended has already been failed by the Orchestrator at
+        the measure boundary; this record is the persistent answer to "why
+        did it stop" for the status log, the operational-status alerts and
+        the agent gateway. Advisory on purpose: the VI is never locked —
+        the next ``initiate_measurement`` on it clears the record
+        (`_clear_measurement_fault()`).
+
+        Args:
+            vi_name: The station measurement VI that reported the fault.
+            flag: One of ``MEASUREMENT_FAULT_FLAGS`` (the condition's kind).
+            message: Human-readable description of the fault.
+        """
+        self._upsert_condition(
+            Condition(
+                key=f"measurement:{vi_name}",
+                origin="measurement",
+                severity="advisory",
+                kind=flag,
+                source_vis=(vi_name,),
+                affected_vis=frozenset({vi_name}),
+                message=message,
+                since=time.time(),
+            )
+        )
+
+    def _clear_measurement_fault(self, vi_name: str, method_name: str) -> None:
+        """Drop *vi_name*'s measurement-fault record once it is armed again.
+
+        Called after every successful dispatch on either path (a run's
+        ``Command`` batch, a manual action). Only ``initiate_measurement``
+        clears: arming is the operator's (or the next run's) decision to
+        measure again, which is the measurement-fault standard's whole
+        recovery — no acknowledge step.
+
+        Args:
+            vi_name: The VI a method was just dispatched to.
+            method_name: The method that succeeded.
+        """
+        if method_name != "initiate_measurement":
+            return
+        if self._conditions.pop(f"measurement:{vi_name}", None) is not None:
+            logger.info("Measurement fault on '%s' cleared: VI armed again.", vi_name)
+
     def publish_conditions(self, origin: str, conditions: Iterable[Condition]) -> None:
         """Replace *origin*'s active conditions with *conditions*, in one refresh.
 
@@ -2025,6 +2073,7 @@ class Station:
                 continue
             logger.debug("Calling %s.%s(%s)", cmd.vi_name, cmd.method, cmd.kwargs)
             method(**cmd.kwargs)
+            self._clear_measurement_fault(cmd.vi_name, cmd.method)
 
     # ------------------------------------------------------------------
     # VI action dispatch
@@ -2122,7 +2171,9 @@ class Station:
                 f"{allowed_scope}-scope. Action refused."
             )
         logger.debug("Dispatching %s.%s(%s)", vi_name, method_name, kwargs)
-        return method(**kwargs)
+        result = method(**kwargs)
+        self._clear_measurement_fault(vi_name, method_name)
+        return result
 
     # ------------------------------------------------------------------
     # Setpoint capabilities (the setpoint-parameter convention)

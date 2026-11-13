@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from cryosoft.core.exceptions import (
     CryoSoftCommunicationError,
     CryoSoftInstrumentError,
+    CryoSoftMeasurementError,
 )
 
 log = logging.getLogger(__name__)
@@ -15,6 +16,17 @@ log = logging.getLogger(__name__)
 # autorange OFF, which is the whole mechanism behind the -221 incident this
 # sim models — see _refuse_out_of_range().
 _CURRENT_RANGES = (2e-9, 20e-9, 200e-9, 2e-6, 20e-6, 200e-6, 2e-3, 20e-3, 100e-3)
+
+# The sample a paired 2182A is wired across: the source needs
+# current x this resistance in volts, so compliance is reached when that
+# exceeds the compliance limit. Only modelled with a paired meter.
+_SAMPLE_RESISTANCE_OHM = 1500.0
+
+_COMPLIANCE_MESSAGE = (
+    "Keithley 6221: source in compliance - the sample cannot carry this "
+    "current within the compliance voltage (check contacts, lower the "
+    "current or raise the compliance limit)"
+)
 
 
 def _range_for(current: float) -> float:
@@ -304,14 +316,39 @@ class SimKeithley6221:
         Generates readings using the paired meter or noise, matching the
         behaviour of trigger_delta_mode() but as a split call.
 
+        Models the real engine's measurement faults (the measurement-fault
+        standard): with a paired meter and compliance abort on, a delta
+        current that needs more than the compliance voltage across the
+        sample aborts the engine (``"compliance"``); an over-range paired
+        meter raises ``"overflow"``; an acquisition that yields nothing
+        raises ``"no_data"``.
+
         Args:
             n_readings: Number of readings to generate.
             period: Ignored in simulation.
 
         Returns:
             List of float voltage readings.
+
+        Raises:
+            CryoSoftMeasurementError: ``"compliance"``, ``"overflow"`` or
+                ``"no_data"`` as above.
         """
         import random
+
+        if (
+            self._paired_meter is not None
+            and self._delta_armed
+            and self._delta_compliance_abort
+            and abs(self._delta_high_current) * _SAMPLE_RESISTANCE_OHM >= self._delta_compliance
+        ):
+            # The compliance abort stops the engine, as on the instrument.
+            self._delta_armed = False
+            raise CryoSoftMeasurementError(
+                "compliance",
+                f"{_COMPLIANCE_MESSAGE}; the delta engine aborted",
+                context="acquire_delta_readings()",
+            )
 
         count = n_readings
         if self._delta_return_count is not None:
@@ -324,6 +361,13 @@ class SimKeithley6221:
                 readings.append(self._paired_meter.get_voltage())  # type: ignore[attr-defined]
             else:
                 readings.append(random.gauss(1.5e-6, 1e-8))
+        if not readings:
+            raise CryoSoftMeasurementError(
+                "no_data",
+                "Keithley 6221: the delta engine returned no reading (engine "
+                "stopped, or the 2182A is not answering on the RS-232 relay)",
+                context="acquire_delta_readings()",
+            )
         self._delta_readings = readings
         return list(self._delta_readings)
 
@@ -347,7 +391,7 @@ class SimKeithley6221:
         self._check_error()
         if self._paired_meter is not None:
             # Sourced current * 1500 Ohm load compared against compliance
-            v_est = self._current * 1500.0
+            v_est = self._current * _SAMPLE_RESISTANCE_OHM
             return abs(v_est) >= self._compliance
         return False
 
@@ -355,7 +399,7 @@ class SimKeithley6221:
         """Read voltage from the paired simulated meter."""
         self._check_error()
         if self._paired_meter is not None:
-            self._paired_meter._base_voltage = self._current * 1500.0
+            self._paired_meter._base_voltage = self._current * _SAMPLE_RESISTANCE_OHM
             return self._paired_meter.get_voltage()
         import random
         return random.gauss(1.5e-6, 1e-8)

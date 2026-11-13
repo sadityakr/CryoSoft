@@ -145,6 +145,21 @@ will fail honest callers: the 6221 sim deliberately does *not* refuse a
 compliance write while delta is armed, because the real driver's own delta
 sequence writes `:SOUR:CURR:COMP` in exactly that state.
 
+**Measurement faults are reported the same way.** A *reading* the
+instrument marks invalid — the source in compliance, the meter over range, an
+acquisition that returned nothing — is raised as
+`CryoSoftMeasurementError(flag, message)` with a flag from
+`MEASUREMENT_FAULT_FLAGS`, never returned as a number (GLOSSARY.md's
+**Measurement fault**). Detect from the instrument's documented signal and
+fail fast; the sim twin raises the same flag for the same physics.
+
+| Driver | Flag | Detection |
+|---|---|---|
+| `keithley_2182a.py` | `overflow` | a reading at the over-range marker `+9.9E37` |
+| `keithley_6221.py` | `overflow` | the same marker through the RS-232 relay (`get_voltage`) or in the delta buffer |
+| `keithley_6221.py` | `compliance` | delta: after the first failed `:CALC1:DATA:FRES?` poll, the latched `:STAT:QUES:EVEN?` bit 1 (instead of waiting out two more 10 s timeouts); DC mode reads `:STAT:QUES:COND?` via `is_in_compliance()` |
+| `keithley_6221.py` | `no_data` | a delta acquisition that returned no reading |
+
 ## The safe-shutdown standard
 
 **Every driver exposes `safe_shutdown()`**, taking no arguments: one

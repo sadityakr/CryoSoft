@@ -33,7 +33,11 @@ from cryosoft.core import events as ev
 from cryosoft.core.availability import TAG_POLICY, Availability
 from cryosoft.core.conditions import Condition, Verdict, decide, envelope_conditions
 from cryosoft.core.events import ErrorEvent
-from cryosoft.core.exceptions import CryoSoftActionScopeError, CryoSoftSafetyError
+from cryosoft.core.exceptions import (
+    CryoSoftActionScopeError,
+    CryoSoftMeasurementError,
+    CryoSoftSafetyError,
+)
 from cryosoft.core.operational_status import build_operational_status
 from cryosoft.core.plan import (
     Command,
@@ -4069,7 +4073,11 @@ class Orchestrator(QObject):
             return
         is_operation = self._is_operation_active()
         self._emit_status(self._measure_status_line())
-        self._procedure.measure()
+        try:
+            self._procedure.measure()
+        except CryoSoftMeasurementError as exc:
+            self._fail_run_for_measurement_fault(exc)
+            return
         if getattr(self._procedure, "measure_pending", False):
             # A datapoint part-way through a reading-loop settle time stays
             # in MEASURING and nothing is announced or stepped until it
@@ -4775,6 +4783,35 @@ class Orchestrator(QObject):
         self._emit_run_finished("failed", reason=message)
         self._change_state(OrchestratorState.ERROR, cause="error")
         self._hold_queue(ev.QUEUE_HOLD_FAILED)
+
+    def _fail_run_for_measurement_fault(self, exc: CryoSoftMeasurementError) -> None:
+        """Fail the active run because a reading raised a measurement fault.
+
+        The measurement-fault standard (GLOSSARY.md's **Measurement fault**):
+        the instrument said the datapoint is not a measurement (compliance,
+        overflow, no data), so the run stops on the FIRST such point — the
+        same blast radius as a watched VI's instrument fault
+        (``_fail_run_for_fault()``: safe-off dispatched, run finished
+        ``"failed"`` with the reason, queue held, machine back to IDLE; not
+        global ERROR). The fault is also recorded as the VI's advisory
+        ``measurement`` condition so the status log, the operational-status
+        alerts and the agent gateway keep answering "why did it stop" after
+        the banner is gone. Nothing is locked: the next
+        ``initiate_measurement`` on the VI clears the record.
+
+        Args:
+            exc: The fault, with ``vi_name`` attached by the procedure.
+        """
+        vi_name = exc.vi_name or "measurement"
+        reason = (
+            f"measurement fault on '{vi_name}' ({exc.flag}) at datapoint "
+            f"{self._datapoint_index + 1}: {exc}"
+        )
+        try:
+            self._station.record_measurement_fault(vi_name, exc.flag, str(exc))
+        except Exception:  # noqa: BLE001 — the record must never block the stop
+            logger.exception("Recording the measurement fault on '%s' failed", vi_name)
+        self._fail_run_for_fault(vi_name, reason=reason)
 
     def _fail_run_for_fault(self, vi_name: str, reason: str | None = None) -> None:
         """Fail the active run because its claimed/watched VI faulted or was held.

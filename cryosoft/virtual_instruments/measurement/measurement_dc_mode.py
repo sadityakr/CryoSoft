@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from typing import Any, ClassVar
 
 from cryosoft.core.decorators import control, monitored
+from cryosoft.core.exceptions import CryoSoftMeasurementError
 from cryosoft.core.plan import ParamSpec
 from cryosoft.virtual_instruments.base import (
     EXCITATION_CURRENT_LIMIT,
@@ -58,6 +59,11 @@ class DCModeMeasurementVI(MeasurementInstrumentBase):
 
     # Reading-loop declaration: the DC current. Can be changed in-place cheaply.
     reading_setters: ClassVar[dict[str, str]] = {"current": "set_dc_current"}
+    # The measurement-fault standard (MeasurementInstrumentBase): what
+    # take_reading() can raise instead of returning a NaN datapoint.
+    measurement_fault_flags: ClassVar[frozenset[str]] = frozenset(
+        {"compliance", "overflow", "no_data"}
+    )
 
     # Route settings declaration (see MeasurementInstrumentBase): each switch
     # route may be armed with its own excitation, range and compliance.
@@ -362,8 +368,12 @@ class DCModeMeasurementVI(MeasurementInstrumentBase):
 
         Takes ``n_readings`` voltage samples. If ``compliance_abort`` is
         enabled, checks compliance ONCE before the sampling loop (not before
-        every individual reading) and skips the whole datapoint (all NaN) if
-        already tripped.
+        every individual reading) and raises ``"compliance"`` if tripped —
+        the measurement-fault standard: the run stops with the reason rather
+        than recording an all-NaN point. A sample that fails on the bus ends
+        the loop and the rest is NaN-padded, as before; if not one sample
+        arrived the datapoint is ``"no_data"``. An over-range meter raises
+        ``"overflow"`` from the driver.
 
         Live commissioning against a real 6221 (2026-07-22) found that
         alternating ``is_in_compliance()``'s ``:STATus:QUEStionable:
@@ -389,6 +399,9 @@ class DCModeMeasurementVI(MeasurementInstrumentBase):
 
         Raises:
             RuntimeError: If ``initiate_measurement()`` has not been called first.
+            CryoSoftMeasurementError: ``"compliance"``, ``"overflow"`` or
+                ``"no_data"`` (see above), its message carrying the current
+                and compliance in force.
         """
         if self._armed is _NOT_INITIATED:
             raise RuntimeError("initiate_measurement() must be called before take_reading().")
@@ -402,20 +415,33 @@ class DCModeMeasurementVI(MeasurementInstrumentBase):
         meter = self._meter    # type: ignore[attr-defined]
 
         if self._compliance_abort and source.is_in_compliance():
-            logger.warning("Keithley 6221 is in compliance — skipping DC measurement.")
-        else:
-            for i in range(n):
-                try:
-                    v = float(meter.get_voltage())
-                    voltages.append(v)
-                    currents.append(self._current)
-                    n_valid += 1
-                except Exception as exc:
-                    logger.error("DC read error at index %d: %s", i, exc)
-                    break
+            raise self._fault(
+                "compliance",
+                "Keithley 6221: source in compliance - the sample cannot carry "
+                "this current within the compliance voltage (check contacts, "
+                "lower the current or raise the compliance limit)",
+            )
+        last_error: Exception | None = None
+        for i in range(n):
+            try:
+                v = float(meter.get_voltage())
+                voltages.append(v)
+                currents.append(self._current)
+                n_valid += 1
+            except CryoSoftMeasurementError as exc:
+                raise self._fault(exc.flag, str(exc)) from exc
+            except Exception as exc:
+                logger.error("DC read error at index %d: %s", i, exc)
+                last_error = exc
+                break
 
-                if i < n - 1 and self._delay_s > 0:
-                    time.sleep(self._delay_s)
+            if i < n - 1 and self._delay_s > 0:
+                time.sleep(self._delay_s)
+
+        if n_valid == 0:
+            raise self._fault(
+                "no_data", f"no voltage reading arrived from the meter ({last_error})"
+            )
 
         # Pad with NaN if we stopped early (or skipped entirely)
         pad = n - n_valid
@@ -436,6 +462,24 @@ class DCModeMeasurementVI(MeasurementInstrumentBase):
             "current_A_error": c_error,
             "n_valid": n_valid,
         }
+
+    def _fault(self, flag: str, message: str) -> CryoSoftMeasurementError:
+        """Build a measurement fault carrying the excitation in force.
+
+        Args:
+            flag: One of ``MEASUREMENT_FAULT_FLAGS``.
+            message: The instrument-level description.
+
+        Returns:
+            The error to raise, its message ending with the current,
+            compliance and voltmeter range armed.
+        """
+        return CryoSoftMeasurementError(
+            flag,
+            f"{message} [current {self._current:.4g} A, compliance "
+            f"{self._compliance_V:g} V, range {self._voltmeter_range_V!r}]",
+            context="take_reading()",
+        )
 
     # ------------------------------------------------------------------
     # Lifecycle

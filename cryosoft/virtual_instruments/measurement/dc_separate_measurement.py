@@ -85,6 +85,9 @@ class DCSeparateMeasurementVI(DCMeasurementBase):
     # loop a list of currents (e.g. "1e-6, -1e-6" for +/- offset cancellation)
     # at every sweep point.
     reading_setters: ClassVar[dict[str, str]] = {"current_A": "set_source_current"}
+    # The measurement-fault standard (MeasurementInstrumentBase): an
+    # over-range meter's overflow propagates from take_reading().
+    measurement_fault_flags: ClassVar[frozenset[str]] = frozenset({"overflow"})
 
     # Control-validation standard (see BaseVirtualInstrument): MERGED with the
     # base's excitation bound rather than replacing it, so the per-reading

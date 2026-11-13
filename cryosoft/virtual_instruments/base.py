@@ -1806,6 +1806,22 @@ class MeasurementInstrumentBase(BaseVirtualInstrument):
     never survives them. Machine-enforced: the name is a real method callable
     with no arguments.
 
+    Measurement faults: ``measurement_fault_flags``
+    -----------------------------------------------
+    The measurement-fault standard (GLOSSARY.md's **Measurement fault**).
+    When the instrument says a reading is not a measurement — the source is
+    in compliance, the meter is over range, the acquisition returned nothing
+    — ``take_reading()`` raises ``CryoSoftMeasurementError`` with one flag
+    from ``MEASUREMENT_FAULT_FLAGS`` instead of returning NaN. The driver
+    detects the condition; the VI lets the error through (adding the
+    settings in force to its message), never turns it into padding. The
+    Orchestrator then fails the run: the source is parked, the reason is
+    shown, the queue holds; the next ``initiate_measurement`` clears the
+    record — the VI is never locked. NaN padding stays for what it always
+    meant: a transient bus glitch on SOME samples. ``measurement_fault_flags``
+    declares the subset this VI can raise (empty = none modelled yet).
+    Machine-enforced: a frozenset drawn from the vocabulary.
+
     Adding a new measurement method: subclass this base (or ``DCMeasurementBase``
     for a DC-resistance method), declare the three class attributes, and
     implement ``data_arrays`` / ``initiate_measurement`` / ``take_reading`` /
@@ -1841,6 +1857,10 @@ class MeasurementInstrumentBase(BaseVirtualInstrument):
     # The method dispatched at a normal run end (see the class docstring's
     # "Run end" section); abort, failure and EMERGENCY always use standby.
     run_end_method: ClassVar[str] = "standby"
+    # The measurement-fault flags take_reading() can raise (see the class
+    # docstring's "Measurement faults" section). Empty (the default) means
+    # this VI's instrument reports none that CryoSoft detects yet.
+    measurement_fault_flags: ClassVar[frozenset[str]] = frozenset()
     # The externally-configured standard's self-description (see the class
     # docstring's "Externally configured instruments" section): the
     # measurement_parameters names the external tool owns when

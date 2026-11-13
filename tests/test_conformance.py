@@ -2568,6 +2568,30 @@ def test_measurement_vi_route_setter_and_run_end_contract(vi_cls: type) -> None:
 @pytest.mark.parametrize(
     "vi_cls", _all_measurement_vi_classes(), ids=lambda c: c.__name__
 )
+def test_measurement_vi_fault_flags_contract(vi_cls: type) -> None:
+    """measurement_fault_flags obeys the measurement-fault standard.
+
+    A ``frozenset`` drawn from the closed vocabulary
+    ``MEASUREMENT_FAULT_FLAGS`` (GLOSSARY.md's **Measurement fault**): a VI
+    may declare only flags the run engine and the docs know the meaning of.
+    The empty default (no fault detected yet) always passes.
+    """
+    from cryosoft.core.exceptions import MEASUREMENT_FAULT_FLAGS
+
+    flags = vi_cls.measurement_fault_flags
+    assert isinstance(flags, frozenset), (
+        f"{vi_cls.__name__}.measurement_fault_flags must be a frozenset, got {flags!r}"
+    )
+    unknown = sorted(flags - MEASUREMENT_FAULT_FLAGS)
+    assert not unknown, (
+        f"{vi_cls.__name__}.measurement_fault_flags names {unknown}, outside "
+        f"MEASUREMENT_FAULT_FLAGS {sorted(MEASUREMENT_FAULT_FLAGS)}"
+    )
+
+
+@pytest.mark.parametrize(
+    "vi_cls", _all_measurement_vi_classes(), ids=lambda c: c.__name__
+)
 def test_measurement_vi_externally_owned_parameters_contract(vi_cls: type) -> None:
     """externally_owned_parameters obeys the externally-configured standard.
 

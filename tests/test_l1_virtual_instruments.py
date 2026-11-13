@@ -603,7 +603,7 @@ def test_dc_mode_initiate_resets_source_before_compliance():
 
 
 def test_dc_mode_measurement_compliance_abort():
-    import math
+    from cryosoft.core.exceptions import CryoSoftMeasurementError
     from cryosoft.virtual_instruments.measurement.measurement_dc_mode import DCModeMeasurementVI
 
     source = SimKeithley6221("SIM")
@@ -623,14 +623,12 @@ def test_dc_mode_measurement_compliance_abort():
         compliance_abort=True
     )
 
-    data = vi.take_reading()
-    # It should abort at the first reading since compliance is checked before the read
-    assert data["n_valid"] == 0
-    assert all(math.isnan(v) for v in data["voltage_V_array"])
-    assert all(math.isnan(c) for c in data["current_A_array"])
-    # Zero valid samples -> mean/error is NaN, not computed from the NaN pad.
-    assert math.isnan(data["voltage_V"])
-    assert math.isnan(data["voltage_V_error"])
+    # The measurement-fault standard: compliance stops the run with the
+    # reason (it used to return an all-NaN point and let the run carry on).
+    with pytest.raises(CryoSoftMeasurementError) as excinfo:
+        vi.take_reading()
+    assert excinfo.value.flag == "compliance"
+    assert "compliance 1 V" in str(excinfo.value)
 
 
 def test_dc_mode_read_now_bench_test():
@@ -1410,8 +1408,9 @@ def _ss_vi_with_current_log():
 def test_ss_dc_mode_arming_never_zeroes_the_source():
     """Arming (and re-arming) writes the target current, never 0 A."""
     vi, _source, _meter, currents = _ss_vi_with_current_log()
-    vi.initiate_measurement(current=1e-3, n_readings=2)
-    vi.initiate_measurement(current=1e-3, n_readings=2)
+    # 1 mA into the sim's 1500 ohm sample needs 1.5 V: arm with headroom.
+    vi.initiate_measurement(current=1e-3, n_readings=2, compliance_V=2.0)
+    vi.initiate_measurement(current=1e-3, n_readings=2, compliance_V=2.0)
     assert currents and 0.0 not in currents
     assert len(vi.take_reading()["voltage_V_array"]) == 2
 

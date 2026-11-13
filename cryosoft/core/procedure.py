@@ -11,7 +11,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 from cryosoft.core.data_manager import DataManager
-from cryosoft.core.exceptions import CryoSoftConfigError
+from cryosoft.core.exceptions import CryoSoftConfigError, CryoSoftMeasurementError
 from cryosoft.core.gates import Gate
 from cryosoft.core.plan import (
     Command,
@@ -2385,7 +2385,16 @@ class SweepMeasureProcedure(BaseProcedure):
                 if wait_s > 0:
                     cursor["ready_at"] = time.monotonic() + wait_s
                     continue
-            reading = vi.take_reading()
+            try:
+                reading = vi.take_reading()
+            except CryoSoftMeasurementError as exc:
+                # The driver cannot know the station's name for its VI; the
+                # Orchestrator needs it to fail the run against that VI (the
+                # measurement-fault standard). The cursor is dropped: the
+                # run ends here.
+                exc.vi_name = self._measurement_vi
+                self._measure_cursor = None
+                raise
             for key, value in reading.items():
                 grids[key][i1][i2] = value
             for block_name, labels in vi.measurement_raw_blocks.items():

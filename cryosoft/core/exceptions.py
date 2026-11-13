@@ -4,6 +4,7 @@ Exception tree:
     CryoSoftError
     ├── CryoSoftCommunicationError   — VISA / instrument communication failure
     │   └── CryoSoftInstrumentError  — the instrument itself refused a command
+    ├── CryoSoftMeasurementError     — a reading reported a measurement fault
     ├── CryoSoftSafetyError          — safety condition violated
     │   └── CryoSoftActionRefusedError    — the direct action path refused a call
     │       ├── CryoSoftPrivateActionError    — underscore-prefixed method name
@@ -92,6 +93,67 @@ class CryoSoftInstrumentError(CryoSoftCommunicationError):
         self.instrument_message = instrument_message
         self.context = context
         super().__init__(message, vi_name=vi_name, original_error=original_error)
+
+
+#: The closed measurement-fault vocabulary (GLOSSARY.md's **Measurement
+#: fault**): every flag a driver may raise a ``CryoSoftMeasurementError``
+#: with, and every flag a measurement VI may declare in
+#: ``measurement_fault_flags``. A new flag is added here, with its meaning,
+#: never invented at a raise site.
+MEASUREMENT_FAULT_FLAGS: frozenset[str] = frozenset({
+    "compliance",        # the source hit its compliance (voltage) limit
+    "overflow",          # the meter is over range (e.g. a 2182A's +9.9E37)
+    "no_data",           # the acquisition returned no reading at all
+    "instrument_error",  # the instrument refused the reading (error queue)
+})
+
+
+class CryoSoftMeasurementError(CryoSoftError):
+    """Raised when an instrument reports that a reading is not a measurement.
+
+    The typed error of the **measurement-fault standard** (GLOSSARY.md's
+    **Measurement fault**): the bus worked, but the instrument said the
+    datapoint is invalid — the source is in compliance, the meter is over
+    range, the acquisition stopped. A driver raises it with one flag from
+    ``MEASUREMENT_FAULT_FLAGS``; the procedure attaches the station VI name;
+    the Orchestrator fails the run on it (stop, source parked, reason shown).
+
+    Deliberately NOT a ``CryoSoftCommunicationError``: code that tolerates a
+    flaky bus read (stale-value handling, a read loop that skips one bad
+    sample) must not swallow it into a NaN, which is exactly how a
+    compliance trip used to leave a run looking stuck with no reason.
+
+    Attributes:
+        flag: One of ``MEASUREMENT_FAULT_FLAGS``.
+        context: What the driver was doing (e.g. ``"take_reading()"``).
+        vi_name: The station VI name, attached by the procedure (the driver
+            does not know it); empty until then.
+    """
+
+    def __init__(
+        self, flag: str, message: str, *, context: str = "", vi_name: str = ""
+    ) -> None:
+        """Build the typed measurement-fault error.
+
+        Args:
+            flag: One of ``MEASUREMENT_FAULT_FLAGS``.
+            message: Human-readable description naming the instrument, the
+                condition and the settings in force.
+            context: The driver call or step that detected the fault.
+            vi_name: The station VI name, when already known.
+
+        Raises:
+            ValueError: If *flag* is not in ``MEASUREMENT_FAULT_FLAGS``.
+        """
+        if flag not in MEASUREMENT_FAULT_FLAGS:
+            raise ValueError(
+                f"unknown measurement-fault flag {flag!r}; "
+                f"expected one of {sorted(MEASUREMENT_FAULT_FLAGS)}"
+            )
+        self.flag = flag
+        self.context = context
+        self.vi_name = vi_name
+        super().__init__(message)
 
 
 class CryoSoftSafetyError(CryoSoftError):

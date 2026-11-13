@@ -74,6 +74,9 @@ Uniform lifecycle (methods)
 - `run_end_method: str` — OPTIONAL (default `"standby"`): the argument-less
   method dispatched when a run ends normally. Abort, failure and EMERGENCY
   always dispatch `standby`. See GLOSSARY.md's **Run end method**.
+- `measurement_fault_flags: frozenset[str]` — OPTIONAL (default empty): the
+  measurement-fault flags `take_reading()` can raise (see "Measurement
+  faults" below). Conformance-checked against `MEASUREMENT_FAULT_FLAGS`.
 - `ping() → bool` — IDN check on all drivers.
 - `reading_setters: dict[str, str]` — OPTIONAL reading-loop declaration
   (default `{}`): maps a `measurement_parameters` name to the cheap setter
@@ -153,6 +156,21 @@ contract — `DataManager` writes it to disk as the block dataset's own
 `axes` attribute naming every dimension in order. A reader opening the file
 directly (h5py, HDFView) sees both attached to `/data/<block_name>` itself,
 with no need to parse the `/metadata` group's JSON `data_config` blob.
+
+## Measurement faults
+When the instrument says a reading is not a measurement, `take_reading()`
+raises `CryoSoftMeasurementError(flag, message)` instead of returning NaN —
+GLOSSARY.md's **Measurement fault**. The driver detects it; the VI lets it
+through, adding the excitation in force to the message. The run fails on the
+first such datapoint (source parked, reason shown, queue held), and the next
+`initiate_measurement` clears the record — the VI is never locked.
+
+| VI | Flags | Source of each |
+|---|---|---|
+| `DCModeMeasurementVI` (+ `SSDCModeMeasurementVI`) | `compliance`, `overflow`, `no_data` | 6221 compliance bit checked once per datapoint (only with `compliance_abort` on); 2182A over range; not one sample read |
+| `DeltaModeMeasurementVI` | `compliance`, `overflow`, `no_data` | the 6221 delta engine's compliance abort (latched status bit); 2182A over range in the buffer; empty acquisition |
+| `DCSeparateMeasurementVI` | `overflow` | 2182A over range |
+| others | none yet | check the instrument manual before declaring a flag |
 
 ## Under-delivery: the n_valid standard
 A VI whose `take_reading()` can deliver fewer raw samples than `data_arrays()`

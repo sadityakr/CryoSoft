@@ -9,6 +9,7 @@ import pyvisa
 from cryosoft.core.exceptions import (
     CryoSoftCommunicationError,
     CryoSoftInstrumentError,
+    CryoSoftMeasurementError,
 )
 
 log = logging.getLogger(__name__)
@@ -18,6 +19,11 @@ log = logging.getLogger(__name__)
 # most a handful of entries; the cap only guarantees termination if an
 # instrument answers nonsense forever.
 _ERROR_QUEUE_DRAIN_LIMIT = 32
+
+# The value the 2182A returns in place of a reading when the input is over
+# range (2182A User's Manual, "Ranges / overflow": +9.9E37). Anything at or
+# above it is the overflow marker, never a voltage.
+OVERFLOW_READING_V = 9.9e37
 
 
 def _parse_scpi_error(reply: str) -> tuple[str, str] | None:
@@ -148,12 +154,18 @@ class Keithley2182A:
 
         Returns:
             Voltage in Volts.
+
+        Raises:
+            CryoSoftCommunicationError: If the reply cannot be parsed.
+            CryoSoftMeasurementError: ``"overflow"`` if the meter returns its
+                over-range marker (``+9.9E37``) — the measurement-fault
+                standard; never returned as a voltage.
         """
         raw = self._query("READ?")
         # Response may contain multiple comma-separated values; take channel 1.
         vals = [v.strip() for v in raw.split(",") if v.strip()]
         try:
-            return float(vals[0])
+            value = float(vals[0])
         except (IndexError, ValueError) as exc:
             # Empty or garbage response — surface as a communication error so
             # the stale-value handling upstream applies instead of a crash.
@@ -161,6 +173,14 @@ class Keithley2182A:
                 f"Keithley 2182A: unparseable READ? response: {raw!r}",
                 vi_name="Keithley2182A",
             ) from exc
+        if abs(value) >= OVERFLOW_READING_V:
+            raise CryoSoftMeasurementError(
+                "overflow",
+                "Keithley 2182A: input over range (reading +9.9E37) — select a "
+                "larger voltmeter range or autorange",
+                context="get_voltage()",
+            )
+        return value
 
     def set_range(self, range_v: float) -> None:
         """Set the DC voltage measurement range.

@@ -40,6 +40,7 @@ from collections.abc import Mapping
 from typing import Any, ClassVar
 
 from cryosoft.core.decorators import control
+from cryosoft.core.exceptions import CryoSoftMeasurementError
 from cryosoft.core.plan import ParamSpec, UIGroup
 from cryosoft.virtual_instruments.base import (
     EXCITATION_CURRENT_LIMIT,
@@ -93,6 +94,11 @@ class DeltaModeMeasurementVI(MeasurementInstrumentBase):
     # between readings (delta mode has no in-place current change), letting the
     # generic sweep procedure loop a list of currents at every sweep point.
     reading_setters: ClassVar[dict[str, str]] = {"current": "set_delta_current"}
+    # The measurement-fault standard (MeasurementInstrumentBase): what
+    # take_reading() can raise instead of returning a NaN datapoint.
+    measurement_fault_flags: ClassVar[frozenset[str]] = frozenset(
+        {"compliance", "overflow", "no_data"}
+    )
 
     # UI-group standard (see BaseVirtualInstrument): delta mode is one
     # workflow with two steps, and on an ungrouped front panel they sit
@@ -338,14 +344,26 @@ class DeltaModeMeasurementVI(MeasurementInstrumentBase):
 
         Raises:
             RuntimeError: If ``initiate_measurement()`` has not been called first.
+            CryoSoftMeasurementError: The engine's measurement fault
+                (``"compliance"``, ``"overflow"``, ``"no_data"`` — the
+                measurement-fault standard), its message carrying the delta
+                current and compliance in force.
         """
         if self._armed is _NOT_INITIATED:
             raise RuntimeError("initiate_measurement() must be called before take_reading().")
 
         n = self._n_readings
-        raw: list[float] = self._source.acquire_delta_readings(  # type: ignore[attr-defined]
-            n, self._delay_s
-        )
+        try:
+            raw: list[float] = self._source.acquire_delta_readings(  # type: ignore[attr-defined]
+                n, self._delay_s
+            )
+        except CryoSoftMeasurementError as exc:
+            raise CryoSoftMeasurementError(
+                exc.flag,
+                f"{exc} [delta current {self._current:.4g} A, compliance "
+                f"{self._compliance_V:g} V, range {self._voltmeter_range_V!r}]",
+                context="take_reading()",
+            ) from exc
 
         voltages: list[float] = [float(v) for v in raw[:n]]
         n_valid = len(voltages)

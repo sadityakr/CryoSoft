@@ -10,6 +10,7 @@ import pyvisa
 from cryosoft.core.exceptions import (
     CryoSoftCommunicationError,
     CryoSoftInstrumentError,
+    CryoSoftMeasurementError,
 )
 
 log = logging.getLogger(__name__)
@@ -19,6 +20,22 @@ log = logging.getLogger(__name__)
 # most a handful of entries; the cap only guarantees termination if an
 # instrument answers nonsense forever.
 _ERROR_QUEUE_DRAIN_LIMIT = 32
+
+# The 2182A's over-range marker, returned in place of a reading through the
+# RS-232 relay and in the delta buffer alike (2182A User's Manual: +9.9E37).
+OVERFLOW_READING_V = 9.9e37
+
+# Questionable Status register bit 1: the source is in voltage compliance
+# (622x Reference Manual, status structure). Read from the CONDition register
+# for "in compliance now" and from the latched EVENt register for "went into
+# compliance since the last read" (a delta compliance abort).
+_QUES_COMPLIANCE_BIT = 2
+
+_COMPLIANCE_MESSAGE = (
+    "Keithley 6221: source in compliance - the sample cannot carry this "
+    "current within the compliance voltage (check contacts, lower the "
+    "current or raise the compliance limit)"
+)
 
 
 def _parse_scpi_error(reply: str) -> tuple[str, str] | None:
@@ -310,6 +327,12 @@ class Keithley6221:
 
         Returns:
             List of delta-voltage readings in Volts (length ≤ n_readings).
+
+        Raises:
+            CryoSoftMeasurementError: ``"compliance"`` if the engine stopped
+                on a compliance abort, ``"overflow"`` if the 2182A is over
+                range, ``"no_data"`` if no reading arrived at all (the
+                measurement-fault standard).
         """
         self._delta_readings = self._poll_readings(n_readings, period)
         return list(self._delta_readings)
@@ -548,6 +571,9 @@ class Keithley6221:
             List of float voltage readings (Volts).
         """
         self._write(":TRAC:CLE")
+        # Reading the EVENt register clears it, so a compliance latched by an
+        # earlier datapoint cannot be charged to this one.
+        self._compliance_latched()
         time.sleep(0.1)
 
         readings: list[float] = []
@@ -561,15 +587,34 @@ class Keithley6221:
                     raw = self._query(":CALC1:DATA:FRES?")
                     vals = [float(v) for v in raw.strip().split(",") if v.strip()]
                     if vals:
+                        if abs(vals[0]) >= OVERFLOW_READING_V:
+                            raise CryoSoftMeasurementError(
+                                "overflow",
+                                "Keithley 2182A (delta mode): input over range "
+                                "(reading +9.9E37) - select a larger voltmeter range",
+                                context="acquire_delta_readings()",
+                            )
                         readings.append(vals[0])
                         consecutive_failures = 0
                         log.debug("K6221 reading %d/%d: %.6e V", i + 1, n, vals[0])
                     else:
                         log.warning("Empty delta reading at index %d — skipping.", i)
                         consecutive_failures += 1
+                except CryoSoftMeasurementError:
+                    raise
                 except Exception as exc:
                     log.error("Delta read error at index %d: %s", i, exc)
                     consecutive_failures += 1
+
+                if consecutive_failures and self._compliance_latched():
+                    # A compliance abort stops the delta engine, so every
+                    # further poll would wait out its full timeout: say why
+                    # now instead of after three of them.
+                    raise CryoSoftMeasurementError(
+                        "compliance",
+                        f"{_COMPLIANCE_MESSAGE}; the delta engine aborted",
+                        context="acquire_delta_readings()",
+                    )
 
                 if consecutive_failures >= 3:
                     log.error("3 consecutive failures — aborting acquisition early.")
@@ -580,7 +625,30 @@ class Keithley6221:
         finally:
             self._instr.timeout = orig
 
+        if not readings:
+            raise CryoSoftMeasurementError(
+                "no_data",
+                "Keithley 6221: the delta engine returned no reading (engine "
+                "stopped, or the 2182A is not answering on the RS-232 relay)",
+                context="acquire_delta_readings()",
+            )
         return readings
+
+    def _compliance_latched(self) -> bool:
+        """Read (and so clear) the latched compliance bit of the EVENt register.
+
+        Never raises: a bus failure while reading it, or an unparseable
+        reply, counts as "not latched", so this check can only add a reason,
+        never break a working acquisition.
+
+        Returns:
+            True if the source went into compliance since the last read.
+        """
+        try:
+            raw = self._query(":STATus:QUEStionable:EVENt?").strip()
+            return bool(int(raw) & _QUES_COMPLIANCE_BIT)
+        except Exception:  # noqa: BLE001 - see docstring
+            return False
 
     def is_in_compliance(self) -> bool:
         """Return True if the current source is currently in compliance.
@@ -605,7 +673,7 @@ class Keithley6221:
                 raw,
             )
             return False
-        return bool(cond & 2)
+        return bool(cond & _QUES_COMPLIANCE_BIT)
 
     def _ensure_serial_relay_configured(self) -> None:
         """Force the relay's serial settings to the documented values."""
@@ -640,6 +708,11 @@ class Keithley6221:
         error). Callers must have already armed the relay via ``set_range()``
         (``initiate_measurement()`` always does this before any
         ``get_voltage()`` call).
+
+        Raises:
+            CryoSoftCommunicationError: If the relayed reply cannot be parsed.
+            CryoSoftMeasurementError: ``"overflow"`` if the 2182A returns its
+                over-range marker (+9.9E37).
         """
         self._write(':SYST:COMM:SER:SEND "MEAS?"')
         # Wait 800 ms for serial transmission and voltmeter integration time
@@ -647,12 +720,20 @@ class Keithley6221:
         raw = self._query(":SYST:COMM:SER:ENT?").strip()
         vals = [v.strip() for v in raw.split(",") if v.strip()]
         try:
-            return float(vals[0])
+            value = float(vals[0])
         except (IndexError, ValueError) as exc:
             raise CryoSoftCommunicationError(
                 f"Keithley 6221: unparseable serial meter response: {raw!r}",
                 vi_name="Keithley6221",
             ) from exc
+        if abs(value) >= OVERFLOW_READING_V:
+            raise CryoSoftMeasurementError(
+                "overflow",
+                "Keithley 2182A (via 6221 relay): input over range (reading "
+                "+9.9E37) - select a larger voltmeter range or autorange",
+                context="get_voltage()",
+            )
+        return value
 
     def set_range(self, range_v: float) -> None:
         """Set the 2182A measurement range via the serial relay.

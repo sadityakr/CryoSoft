@@ -1,6 +1,6 @@
 """The System-Condition standard: origin x severity, scope follows severity.
 
-CryoSoft has exactly four producers of "something is wrong":
+CryoSoft has exactly five producers of "something is wrong":
 
 - ``"safety"`` — a Virtual Instrument's ``evaluate_safety()`` (see
   `virtual_instruments/base.py` and the **Control-validation standard** in
@@ -15,11 +15,17 @@ CryoSoft has exactly four producers of "something is wrong":
   a slow independent cadence rather than every tick. Every trend check
   declared so far is ``"advisory"`` severity, making this origin the first
   real producer of that reserved rung (see the severity list below).
+- ``"measurement"`` — the last measurement fault of a measurement VI (see
+  `GLOSSARY.md`'s **Measurement fault**), recorded by the Orchestrator when
+  a reading raised ``CryoSoftMeasurementError`` and cleared by the Station
+  the next time that VI is armed. Always ``"advisory"``: the run it ended
+  was already failed at the measure boundary, and the VI is deliberately
+  never locked — it is the record of WHY, not an enforcement.
 
 Each origin emits `Condition` objects with one of three severities:
 
 - ``"advisory"`` — reported, no enforcement. Every ``"trend"``-origin
-  condition uses this rung today; no other origin has published one yet.
+  and every ``"measurement"``-origin condition uses this rung.
 - ``"hold"`` — scoped to the condition's `affected_vis`: those VIs go to
   standby on onset, their manual controls are refused while the condition
   persists, and a run watching one of them fails.
@@ -29,7 +35,7 @@ Each origin emits `Condition` objects with one of three severities:
 
 This module is the *pure policy* layer of the standard: it holds the
 `Condition`/`Verdict` value objects and the deterministic `decide()`
-function, and imports nothing beyond the Python standard library. The four
+function, and imports nothing beyond the Python standard library. The five
 producers and the enforcement they trigger (standby, EMERGENCY entry, run
 failure) live above this module (Station, Orchestrator, and — for
 ``"trend"`` — `core/trend_check_runner.py`) and are out of scope here — see
@@ -50,7 +56,7 @@ from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 
 SEVERITIES = ("advisory", "hold", "critical")
-ORIGINS = ("comm", "safety", "envelope", "trend")
+ORIGINS = ("comm", "safety", "envelope", "trend", "measurement")
 
 
 @dataclass(frozen=True)

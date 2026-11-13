@@ -6,6 +6,7 @@ import random
 from cryosoft.core.exceptions import (
     CryoSoftCommunicationError,
     CryoSoftInstrumentError,
+    CryoSoftMeasurementError,
 )
 
 log = logging.getLogger(__name__)
@@ -14,6 +15,10 @@ log = logging.getLogger(__name__)
 # instrument's over-range headroom. A requested range above this is refused
 # outright — see set_range().
 _MAX_RANGE_V = 120.0
+
+# Each range reads up to 120 % of its full scale before the instrument
+# reports overflow (+9.9E37) instead of a value.
+_OVERRANGE_FACTOR = 1.2
 
 
 class SimKeithley2182A:
@@ -56,11 +61,29 @@ class SimKeithley2182A:
     def get_voltage(self) -> float:
         """Return a single voltage reading with Gaussian noise.
 
+        Models over range: a signal above 120 % of the fixed range (above the
+        largest range under autorange) is the instrument's overflow, raised
+        exactly as the real driver raises it.
+
         Returns:
             Voltage in Volts (float).
+
+        Raises:
+            CryoSoftMeasurementError: ``"overflow"`` when over range.
         """
         self._check_error()
-        return self._base_voltage + random.gauss(0.0, self._noise_std)
+        value = self._base_voltage + random.gauss(0.0, self._noise_std)
+        full_scale = _MAX_RANGE_V if self._auto_range else _OVERRANGE_FACTOR * self._range
+        if abs(value) > full_scale:
+            # The instrument returns +9.9E37; the real driver turns that
+            # marker into this same typed error.
+            raise CryoSoftMeasurementError(
+                "overflow",
+                "Keithley 2182A: input over range (reading +9.9E37) — select a "
+                "larger voltmeter range or autorange",
+                context="get_voltage()",
+            )
+        return value
 
     def set_range(self, range_v: float) -> None:
         """Set the measurement voltage range.
