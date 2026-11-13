@@ -439,10 +439,9 @@ class BaseProcedure:
         names this procedure as the owner); every VI NOT in the set stays
         under manual control exactly as in IDLE.
 
-        Every procedure today keeps the default (claim everything) —
-        procedures remain exclusive in this iteration (plan's "Concurrency
-        scope: manual controls only" decision); only operations narrow
-        their claims.
+        A plain procedure keeps the default (claim everything). Every
+        ``SweepMeasureProcedure`` narrows it to the VIs it actually drives,
+        and operations narrow it to the VIs their steps touch.
 
         Returns:
             A set of VI names, as registered on the station
@@ -614,12 +613,16 @@ class BaseProcedure:
 
         Returns:
             One ``Command(vi_name, "initiate", {})`` per VI named in
-            ``claimed_vi_names()`` — every station VI, in registration order,
-            when that is ``None`` (the claim-everything default).
+            ``claimed_vi_names()`` — every station VI when that is ``None``
+            (the claim-everything default) — in station registration order,
+            so the dispatch order never depends on set iteration.
         """
         claimed = self.claimed_vi_names()
-        vi_names = self._station.get_vi_names() if claimed is None else claimed
-        return tuple(Command(vi_name, "initiate", {}) for vi_name in vi_names)
+        return tuple(
+            Command(vi_name, "initiate", {})
+            for vi_name in self._station.get_vi_names()
+            if claimed is None or vi_name in claimed
+        )
 
     def get_data_keys(self) -> list[str]:
         """Return all datapoint keys available for live-plot axis selection.
@@ -1978,6 +1981,25 @@ class SweepMeasureProcedure(BaseProcedure):
             measurement_arrays=dict(vi.data_arrays(self._measurement_params)),
             measurement_blocks=measurement_blocks,
             loop_shape=self._loop_shape,
+        )
+
+    def claimed_vi_names(self) -> set[str]:
+        """Return only the VIs this sweep actually drives.
+
+        Every VI the run sends a setpoint to (``planned_targets()``), the
+        selected measurement VI, and each reading-loop slot's VI. Everything
+        else stays under manual front-panel control for the whole run and
+        is never sent ``initiate()`` by it (``_claim_initiate_commands()``):
+        a temperature channel switched off leaves its controller exactly as
+        the operator has it, heater mode and setpoint included.
+
+        Returns:
+            The set of VI names this run claims.
+        """
+        return (
+            set(self.planned_targets())
+            | {self._measurement_vi}
+            | {slot["vi_name"] for slot in self._loop_slots}
         )
 
     def planned_targets(self) -> dict[str, list[float]]:

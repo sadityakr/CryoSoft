@@ -164,9 +164,14 @@ def test_field_sweep_initiate_full_phaseplan(station, tmp_path, meas):
     assert plan.targets["magnet_z"] == Target(-0.1)
     assert plan.targets["temperature_vti"] == Target(300.0)
 
-    # FieldSweep keeps the default claim (claimed_vi_names() -> None), so
-    # claim_commands initiate every station VI, in station registration order.
-    assert [c.vi_name for c in plan.claim_commands] == station.get_vi_names()
+    # FieldSweep claims only what it drives, so claim_commands initiate exactly
+    # those VIs, in station registration order — never temperature_sample
+    # (switched off by default) or any other station VI.
+    claimed = {"magnet_z", "temperature_vti", meas["measurement_vi"]}
+    assert proc.claimed_vi_names() == claimed
+    assert [c.vi_name for c in plan.claim_commands] == [
+        name for name in station.get_vi_names() if name in claimed
+    ]
     assert all(c.method == "initiate" and c.kwargs == {} for c in plan.claim_commands)
 
     assert len(plan.commands) == 1
@@ -295,8 +300,12 @@ def test_temp_sweep_initiate_full_phaseplan(station, tmp_path, meas):
     assert plan.targets["magnet_z"] == Target(0.0)
     assert "magnet_y" not in plan.targets
 
-    # TemperatureSweep keeps the default claim too — every station VI.
-    assert [c.vi_name for c in plan.claim_commands] == station.get_vi_names()
+    # TemperatureSweep claims only what it drives too.
+    claimed = {"magnet_z", "temperature_vti", meas["measurement_vi"]}
+    assert proc.claimed_vi_names() == claimed
+    assert [c.vi_name for c in plan.claim_commands] == [
+        name for name in station.get_vi_names() if name in claimed
+    ]
     assert all(c.method == "initiate" and c.kwargs == {} for c in plan.claim_commands)
 
     assert len(plan.commands) == 1
@@ -358,6 +367,65 @@ def test_temp_sweep_run_resets_a_stale_manual_heater_to_auto(station, tmp_path):
     try:
         orch.run_procedure(proc)
         assert station.temperature_vti.heater_mode() == "AUTO"
+    finally:
+        orch.shutdown()
+
+
+@pytest.mark.parametrize("proc_cls,fast", [
+    pytest.param(FieldSweep, FAST_FIELD, id="field"),
+    pytest.param(TemperatureSweep, FAST_TEMP, id="temperature"),
+])
+def test_switched_off_temperature_channels_are_left_untouched_and_free(
+    station, tmp_path, proc_cls, fast
+):
+    """With both temperature channels off, a run never touches either controller.
+
+    Run start sends them no initiate() (which would pin the setpoint to the
+    rounded reading and force the heater to AUTO), so the heater mode and
+    setpoint the operator left stay exactly as they were, and both front
+    panels stay under manual control for the whole run.
+    """
+    from cryosoft.core.orchestrator import Orchestrator
+
+    for vi_name in ("temperature_vti", "temperature_sample"):
+        vi = station.get_vi(vi_name)
+        vi.set_heater_mode("MANUAL")
+        vi._driver.set_setpoint(4.2)
+
+    proc = proc_cls(
+        station=station, sample_info=SAMPLE_INFO, data_directory=str(tmp_path),
+        **{**fast, **DC, "set_vti_temperature": False, "set_sample_temperature": False},
+    )
+    assert not proc.claimed_vi_names() & {"temperature_vti", "temperature_sample"}
+
+    orch = Orchestrator(station, tick_interval_ms=10)
+    try:
+        orch.run_procedure(proc)
+        for vi_name in ("temperature_vti", "temperature_sample"):
+            vi = station.get_vi(vi_name)
+            assert vi.heater_mode() == "MANUAL"
+            assert vi.setpoint() == pytest.approx(4.2)
+            admitted, reason = orch._manual_action_admissible(vi_name)
+            assert admitted, reason
+        # A channel the run does drive stays claimed.
+        admitted, _ = orch._manual_action_admissible("magnet_z")
+        assert not admitted
+    finally:
+        orch.shutdown()
+
+
+def test_switched_on_temperature_channel_is_claimed(station, tmp_path):
+    """A switched-on channel is claimed: initiated at run start, panel locked."""
+    from cryosoft.core.orchestrator import Orchestrator
+
+    proc = _field_proc(station, tmp_path, DC)  # set_vti_temperature defaults on
+    orch = Orchestrator(station, tick_interval_ms=10)
+    try:
+        orch.run_procedure(proc)
+        admitted, _ = orch._manual_action_admissible("temperature_vti")
+        assert not admitted
+        admitted, reason = orch._manual_action_admissible("temperature_sample")
+        assert admitted, reason
     finally:
         orch.shutdown()
 

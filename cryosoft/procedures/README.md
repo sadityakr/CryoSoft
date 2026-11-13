@@ -83,8 +83,11 @@ axis hooks.
 - `claimed_vi_names() -> set[str] | None` (`BaseProcedure`; the **Claim**
   standard — see GLOSSARY.md): declares which VIs a running procedure exclusively owns, so
   the Orchestrator knows what a manual front-panel action may touch while
-  it runs. Default `None` (claim everything) — procedures stay exclusive in
-  this iteration; only `TimeSeries` narrows it (see below). The same
+  it runs. Default `None` (claim everything) for a plain procedure; every
+  `SweepMeasureProcedure` narrows it to the VIs it drives — the VIs in
+  `planned_targets()`, the selected measurement VI and each reading-loop
+  slot's VI — so an unused instrument (a temperature channel switched off,
+  the level meter) stays under manual control and untouched. The same
   declaration drives `_claim_initiate_commands()`: one `initiate()` `Command`
   per claimed VI, carried in `initiate()`'s returned `PhasePlan.claim_commands`
   and dispatched first — so a claimed VI an operator left in a non-standard
@@ -198,7 +201,7 @@ procedure of the same shape:
 | Piece | What it does |
 |---|---|
 | `sweep_axis = None` + `axis_data_key()` | The axis is elapsed time (`elapsed_s`), not a ramped quantity, so the GUI renders no linear/segments/CSV shape editor. `_build_sweep_array()` returns the schedule of measurement instants; its length is `max_duration_s / step_time_s`, which is what keeps the progress bar, `n_sweep_points`, and "Point n/N" meaningful. |
-| A narrowed `claimed_vi_names()` | Returns only the measurement VI plus any reading-loop VI, so the Orchestrator's admission gate leaves every magnet and temperature front panel live for the whole run. The only procedure that does not claim the whole station. This also narrows `_claim_initiate_commands()` — a Time Series run never calls `initiate()` on a magnet or temperature controller it does not claim, so it never disturbs whatever state the operator has it in. |
+| A narrowed `claimed_vi_names()` | Returns only the measurement VI plus any reading-loop VI, so the Orchestrator's admission gate leaves every magnet and temperature front panel live for the whole run. This is the generic sweep rule (`SweepMeasureProcedure.claimed_vi_names()`) with no planned targets; the override only restates it. This also narrows `_claim_initiate_commands()` — a Time Series run never calls `initiate()` on a magnet or temperature controller it does not claim, so it never disturbs whatever state the operator has it in. |
 | An empty **ramp scope** (GLOSSARY.md) | A run owns the ramps it targeted; this one targets nothing. A manual front-panel ramp therefore neither delays its next reading nor is stopped when the run ends. Ramp *advancement* is unaffected: every non-PAUSED tick still steps every ramp generator. |
 
 The end condition is either the schedule alone or a watched channel reaching a
@@ -316,8 +319,10 @@ gated by a bool parameter:
 | `set_sample_temperature` | `False` | Emits a `temperature_sample` target — the fixed `sample_temperature` in `FieldSweep`; in `TemperatureSweep` the swept value itself (the sample is the swept axis), re-sent at every step with the sweep rate |
 
 "Off" means the procedure emits **no `Target`** for that VI, so the Orchestrator
-never calls `start_ramp` on it and the controller holds exactly where the operator
-left it. Reading is unaffected: monitoring, logging and trends come from the tick
+never calls `start_ramp` on it, and the run does not claim it: no `initiate()` at
+run start (which would pin the setpoint to the rounded reading and force the heater
+to AUTO) and its front panel stays live for the whole run. The controller holds
+exactly where the operator left it. Reading is unaffected: monitoring, logging and trends come from the tick
 loop's monitor pass, not from targets. A channel that is switched on but has no VI
 on the station is refused at construction (`CryoSoftConfigError`); a switched-off
 channel is not required to exist.
