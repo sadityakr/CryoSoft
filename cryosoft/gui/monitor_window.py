@@ -2172,6 +2172,11 @@ class MonitorWindow(QMainWindow):
         cleanup), so it is safe to call unconditionally here whenever state
         is not already IDLE.
 
+        The ProcedureWindow is closed with it — it is a separate top-level
+        window, so on its own it would keep the application alive after the
+        monitor is gone. It is closed after the session save, which reads
+        the open ProcedureWindow's selection, parameters and queue.
+
         Detaching the log handler prevents it from writing to the destroyed
         ``QTextEdit`` after the window is gone (RuntimeError on a dead widget).
         Accepting the close is also what releases this window's own strong
@@ -2193,6 +2198,8 @@ class MonitorWindow(QMainWindow):
             )
             self._orchestrator.abort_procedure()
         self._save_session()
+        if self._procedure_window is not None:
+            self._procedure_window.close()
         self._log_panel.detach()
         settings = app_settings.get_settings()
         settings.setValue(_GEOMETRY_KEY, self.saveGeometry())

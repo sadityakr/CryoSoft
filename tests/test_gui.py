@@ -3494,6 +3494,20 @@ def test_closing_window_idle_does_not_call_abort(monitor_win, orchestrator, monk
     assert calls == []
 
 
+def test_closing_monitor_window_closes_procedure_window(monitor_win, qtbot):
+    """Closing the monitor closes the ProcedureWindow it opened.
+
+    The ProcedureWindow is a separate top-level window; left open it would
+    keep the application running after the monitor is gone.
+    """
+    monitor_win._open_procedures()
+    procedure_window = monitor_win._procedure_window
+    qtbot.addWidget(procedure_window)
+    assert procedure_window.isVisible()
+    monitor_win.close()
+    assert not procedure_window.isVisible()
+
+
 # ── Phase 2: notification banner (replaces modal dialog storms) ────────────────
 
 def test_banner_hidden_by_default(qtbot):
