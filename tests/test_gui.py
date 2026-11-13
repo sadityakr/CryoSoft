@@ -20,6 +20,7 @@ rather than touching the engine from this thread.
 """
 
 import gc
+import json
 import logging
 from pathlib import Path
 
@@ -47,6 +48,7 @@ from PyQt6.QtWidgets import (
 
 from cryosoft.core.config_catalog import ConfigCatalog
 from cryosoft.core.decorators import control, monitored
+from cryosoft.core import events as ev
 from cryosoft.core.events import ErrorEvent
 from cryosoft.core.exceptions import CryoSoftCommunicationError
 from cryosoft.core.orchestrator import Orchestrator, OrchestratorState
@@ -2596,6 +2598,28 @@ def test_store_health_changed_shows_and_clears_banner(monitor_win_session, sessi
 
 # ── _save_session targets the correct tier ──────────────────────────────────────
 
+def test_the_per_user_file_never_restores_or_stores_a_queue(
+    station, orchestrator, qtbot
+):
+    """With no experiment open the queue is not persisted — no stale rows."""
+    stale = session_store.FormAutosaveState(
+        sample_name="kept",
+        queue=[session_store.QueueItemState(procedure="Field Sweep")],
+    )
+    path = _app_settings.autosave_file_path(None)
+    session_store.save(stale, path)
+
+    win = MonitorWindow(station, orchestrator)
+    qtbot.addWidget(win)
+
+    assert win._session.sample_name == "kept"
+    assert win._session.queue == []
+    win._session.queue = list(stale.queue)
+    win._save_session()
+    assert session_store.load(path).queue == []
+
+
+
 def test_save_session_targets_session_folder_when_open_else_per_user_file(
     monitor_win_session, session_manager, monkeypatch
 ):
@@ -3744,55 +3768,313 @@ def test_procedure_window_skips_unknown_procedure_in_queue(station, orchestrator
     assert win._queue_panel._queue_list.count() == 0
 
 
-def test_run_queue_marks_running_then_done(station, orchestrator, qtbot, monkeypatch):
-    """Running the queue marks items running, then done as each finishes."""
-    info, ddir = _sample_stub(), _data_dir_stub()
+def _queued_window(station, orchestrator, qtbot, count=2, data_dir=None):
+    """A ProcedureWindow with *count* default runs waiting in its queue.
+
+    Pass a writable *data_dir* for a test that lets the engine really start
+    a run (the stub directory is only ever validated, never written).
+    """
+    info = _sample_stub()
+    ddir = (lambda: str(data_dir)) if data_dir is not None else _data_dir_stub()
     win = ProcedureWindow(station, orchestrator, info, ddir)
     qtbot.addWidget(win)
-    win._on_add_to_queue()
-    win._on_add_to_queue()
+    for index in range(count):
+        win._params_panel._file_prefix_input.setText(f"run{index}")
+        win._on_add_to_queue()
     settled(orchestrator)
-    assert [e.status for e in win._queue_panel._queue] == ["pending", "pending"]
-
-    # Stub the actual run: exercise only the GUI's per-item status logic.
-    monkeypatch.setattr(orchestrator, "run_queue", lambda: None)
-    win._queue_panel._on_run_queue()
-    settled(orchestrator)
-    assert win._queue_panel._queue[0].status == "running"
-    assert win._queue_panel._queue_running is True
-
-    orchestrator.procedure_finished.emit()
-    settled(orchestrator)
-    assert win._queue_panel._queue[0].status == "done"
-    assert win._queue_panel._queue[1].status == "running"
-
-    orchestrator.procedure_finished.emit()
-    settled(orchestrator)
-    assert win._queue_panel._queue[1].status == "done"
-    assert win._queue_panel._queue_running is False
+    return win
 
 
-def test_abort_marks_running_item_failed(station, orchestrator, qtbot, monkeypatch):
-    """Aborting a queued run marks that item failed and promotes the next."""
-    info, ddir = _sample_stub(), _data_dir_stub()
-    win = ProcedureWindow(station, orchestrator, info, ddir)
-    qtbot.addWidget(win)
-    win._on_add_to_queue()
-    win._on_add_to_queue()
-    settled(orchestrator)
-    monkeypatch.setattr(orchestrator, "run_queue", lambda: None)
-    monkeypatch.setattr(orchestrator, "abort_procedure", lambda: None)
-    win._queue_panel._on_run_queue()
-    settled(orchestrator)
-    assert win._queue_panel._queue[0].status == "running"
+def _start_event(entry):
+    """The RunStarted the engine emits for a run built from *entry*."""
+    return ev.RunStarted(run_id="r", manifest={"spec_id": entry.spec.spec_id})
 
-    monkeypatch.setattr(
-        QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes
+
+def _finish_event(entry, status, reason=""):
+    """The RunFinished the engine emits for a run built from *entry*."""
+    return ev.RunFinished(
+        run_id="r",
+        status=status,
+        reason=reason,
+        manifest={"spec_id": entry.spec.spec_id},
     )
-    win._on_abort()
+
+
+def test_row_status_follows_the_engine_events(station, orchestrator, qtbot):
+    """Rows turn running/done from the engine's events, not from button clicks."""
+    win = _queued_window(station, orchestrator, qtbot)
+    panel = win._queue_panel
+    first, second = panel._queue
+
+    # The engine pulls the first spec: the row is running (starting).
+    panel._host.take_next_spec()
     settled(orchestrator)
-    assert win._queue_panel._queue[0].status == "failed"
-    assert win._queue_panel._queue[1].status == "running"
+    assert [e.status for e in panel._queue] == ["running", "pending"]
+    assert "starting" in panel._queue_list.item(0).text()
+
+    panel._on_event(_start_event(first))
+    assert first.started and "starting" not in panel._queue_list.item(0).text()
+
+    panel._on_event(_finish_event(first, "done"))
+    assert [e.status for e in panel._queue] == ["done", "pending"]
+    assert panel._summary_label.text() == "1 waiting · 1 done"
+    assert second.status == "pending"
+
+
+def test_an_aborted_queue_run_is_marked_aborted_not_running(
+    station, orchestrator, qtbot
+):
+    """The reported bug: after an abort no row may still say "running"."""
+    win = _queued_window(station, orchestrator, qtbot)
+    panel = win._queue_panel
+    first = panel._queue[0]
+    panel._host.take_next_spec()
+    settled(orchestrator)
+    panel._on_event(_start_event(first))
+
+    panel._on_event(_finish_event(first, "aborted"))
+
+    assert first.status == "aborted"
+    assert not panel.is_running()
+    assert [e.status for e in panel._queue] == ["aborted", "pending"]
+
+
+def test_a_run_that_fails_before_starting_does_not_stay_running(
+    station, orchestrator, qtbot
+):
+    """A pulled run whose setup failed resolves when the engine falls to ERROR."""
+    win = _queued_window(station, orchestrator, qtbot)
+    panel = win._queue_panel
+    panel._host.take_next_spec()
+    settled(orchestrator)
+
+    panel._on_event(ev.StateChange(state="ERROR", previous="INITIATING"))
+
+    assert panel._queue[0].status == "failed"
+    assert not panel.is_running()
+
+
+def test_abort_holds_the_queue_and_resume_releases_it(
+    station, orchestrator, qtbot, monkeypatch, tmp_path
+):
+    """End to end on the real engine: abort -> held, nothing chains; Resume runs."""
+    win = _queued_window(station, orchestrator, qtbot, data_dir=tmp_path)
+    panel = win._queue_panel
+    run_btn = win.findChild(QPushButton, "run_queue_btn")
+
+    run_btn.click()
+    settled(orchestrator, rounds=3)
+    assert panel._queue[0].status == "running"
+    assert panel._queue[1].status == "pending"
+
+    monkeypatch.setattr(QMessageBox, "exec", _click_dialog_button("abort_hold_queue_btn"))
+    win._on_abort()
+    settled(orchestrator, rounds=3)
+
+    assert panel._queue[0].status == "aborted"
+    assert panel._queue[1].status == "pending", "abort must not start the next run"
+    assert panel.is_held()
+    assert run_btn.text() == "Resume Queue"
+    hold_label = win.findChild(QLabel, "queue_hold_label")
+    assert not hold_label.isHidden() and "aborted" in hold_label.text()
+
+    run_btn.click()
+    settled(orchestrator, rounds=3)
+    assert not panel.is_held()
+    assert panel._queue[1].status == "running"
+    orchestrator.abort_procedure()
+    settled(orchestrator, rounds=3)
+
+
+def _click_dialog_button(object_name):
+    """A stand-in for ``QMessageBox.exec`` that clicks one named button."""
+
+    def _exec(box):
+        box.findChild(QPushButton, object_name).click()
+        return 0
+
+    return _exec
+
+
+def test_abort_and_clear_empties_the_queue(
+    station, orchestrator, qtbot, monkeypatch, tmp_path
+):
+    """The abort dialog's second choice throws the waiting runs away too."""
+    win = _queued_window(station, orchestrator, qtbot, count=3, data_dir=tmp_path)
+    panel = win._queue_panel
+    win.findChild(QPushButton, "run_queue_btn").click()
+    settled(orchestrator, rounds=3)
+
+    monkeypatch.setattr(QMessageBox, "exec", _click_dialog_button("abort_clear_queue_btn"))
+    win._on_abort()
+    settled(orchestrator, rounds=3)
+
+    assert panel._host.snapshot() == ()
+    assert [e.status for e in panel._queue] == ["aborted"]
+    assert not panel.is_held(), "a hold on an empty queue holds nothing"
+
+
+def test_hold_after_current_button_sets_the_engine_hold(station, orchestrator, qtbot):
+    """The hold button is a command; its checked state is the engine's answer."""
+    win = _queued_window(station, orchestrator, qtbot)
+    hold_btn = win.findChild(QPushButton, "queue_hold_btn")
+    assert hold_btn.isEnabled() and not hold_btn.isChecked()
+
+    hold_btn.click()
+    settled(orchestrator)
+    assert win._queue_panel.is_held()
+    assert hold_btn.isChecked()
+
+    hold_btn.click()
+    settled(orchestrator)
+    assert not win._queue_panel.is_held()
+
+
+def test_queue_buttons_enable_only_what_would_act(station, orchestrator, qtbot):
+    """No waiting runs, no Run/Hold/Export; a selection enables the row actions."""
+    info, ddir = _sample_stub(), _data_dir_stub()
+    win = ProcedureWindow(station, orchestrator, info, ddir)
+    qtbot.addWidget(win)
+    panel = win._queue_panel
+    assert not win.findChild(QPushButton, "run_queue_btn").isEnabled()
+    assert not win.findChild(QPushButton, "queue_hold_btn").isEnabled()
+    assert not panel._export_action.isEnabled()
+    assert panel._summary_label.text() == "Queue empty"
+
+    win._on_add_to_queue()
+    settled(orchestrator)
+    assert win.findChild(QPushButton, "run_queue_btn").isEnabled()
+    assert not win.findChild(QPushButton, "queue_up_btn").isEnabled()
+    panel._queue_list.setCurrentRow(0)
+    assert win.findChild(QPushButton, "queue_up_btn").isEnabled()
+
+
+def test_queue_export_then_import_appends_validated_runs(
+    station, orchestrator, qtbot, tmp_path
+):
+    """A queue file round-trips; import appends, re-validated, with fresh ids."""
+    win = _queued_window(station, orchestrator, qtbot)
+    panel = win._queue_panel
+    path = tmp_path / "queue.json"
+    assert panel.export_queue_file(path)
+    exported = [spec.spec_id for spec in panel._host.snapshot()]
+
+    assert panel.import_queue_file(path) == 2
+    settled(orchestrator)
+
+    snapshot = panel._host.snapshot()
+    assert [spec.file_prefix for spec in snapshot] == ["run0", "run1", "run0", "run1"]
+    assert len({spec.spec_id for spec in snapshot}) == 4
+    assert [spec.spec_id for spec in snapshot[:2]] == exported
+
+
+def test_queue_import_reports_runs_it_refuses(
+    station, orchestrator, qtbot, tmp_path, monkeypatch
+):
+    """An unknown procedure in a queue file is reported, the rest still queued."""
+    win = _queued_window(station, orchestrator, qtbot, count=1)
+    panel = win._queue_panel
+    path = tmp_path / "queue.json"
+    panel.export_queue_file(path)
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document["runs"].append(dict(document["runs"][0], run_class="NoSuchProcedure"))
+    path.write_text(json.dumps(document), encoding="utf-8")
+    shown: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox, "warning", lambda parent, title, text, *a, **k: shown.append(text)
+    )
+
+    assert panel.import_queue_file(path) == 1
+    assert shown and "NoSuchProcedure" in shown[0]
+
+
+def test_queue_import_reads_an_experiment_gui_state_file(
+    station, orchestrator, qtbot, tmp_path
+):
+    """An earlier experiment's gui_state.json imports like a queue file."""
+    win = _queued_window(station, orchestrator, qtbot)
+    state = session_store.FormAutosaveState()
+    win.export_session_state(state)
+    path = tmp_path / "gui_state.json"
+    session_store.save(state, path)
+
+    other = _queued_window(station, orchestrator, qtbot, count=0)
+    assert other._queue_panel.import_queue_file(path) == 2
+
+
+def test_queue_import_refuses_a_file_that_is_not_a_queue(
+    station, orchestrator, qtbot, tmp_path, monkeypatch
+):
+    """Any file can be picked; one that is not a queue is refused by name."""
+    win = _queued_window(station, orchestrator, qtbot, count=0)
+    path = tmp_path / "notes.json"
+    path.write_text(json.dumps({"hello": 1}), encoding="utf-8")
+    shown: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox, "warning", lambda parent, title, text, *a, **k: shown.append(text)
+    )
+    assert win._queue_panel.import_queue_file(path) == 0
+    assert shown and "not a CryoSoft queue file" in shown[0]
+
+
+def test_a_restored_queue_comes_back_held(station, orchestrator, qtbot):
+    """Waiting runs restored from an experiment never start on their own."""
+    win = _queued_window(station, orchestrator, qtbot)
+    state = session_store.FormAutosaveState()
+    win.export_session_state(state)
+    win._queue_panel.reset()
+    settled(orchestrator)
+
+    win.apply_session_queue(state)
+    settled(orchestrator)
+
+    panel = win._queue_panel
+    assert len(panel._host.snapshot()) == 2
+    assert panel.is_held()
+    assert "Restored 2" in win.findChild(QLabel, "queue_hold_label").text()
+
+
+def test_a_restored_probe_stays_a_probe(station, orchestrator, qtbot):
+    """A saved probe run must never come back as the full run it probes."""
+    win = _queued_window(station, orchestrator, qtbot, count=1)
+    win._queue_panel._queue_list.setCurrentRow(0)
+    win._queue_panel._queue_probe_first()
+    settled(orchestrator)
+    state = session_store.FormAutosaveState()
+    win.export_session_state(state)
+
+    win.apply_session_queue(state)
+    settled(orchestrator)
+
+    probes = [s for s in win._queue_panel._host.snapshot() if s.probe_spec]
+    assert len(probes) == 1
+
+
+def test_restoring_another_experiment_replaces_the_rows(station, orchestrator, qtbot):
+    """No row from the previous experiment lingers after a switch."""
+    win = _queued_window(station, orchestrator, qtbot)
+    empty = session_store.FormAutosaveState()
+
+    win.apply_session_queue(empty)
+    settled(orchestrator)
+
+    assert win._queue_panel._queue_list.count() == 0
+    assert win._queue_panel._host.snapshot() == ()
+
+
+def test_clear_finished_drops_only_history(station, orchestrator, qtbot):
+    """Clear finished rows keeps the waiting ones."""
+    win = _queued_window(station, orchestrator, qtbot)
+    panel = win._queue_panel
+    first = panel._queue[0]
+    panel._host.take_next_spec()
+    settled(orchestrator)
+    panel._on_event(_finish_event(first, "failed", "boom"))
+    assert "boom" in panel._queue_list.item(0).toolTip()
+
+    panel.clear_finished()
+
+    assert [e.status for e in panel._queue] == ["pending"]
 
 
 def test_queue_holds_specs_not_procedures(station, orchestrator, qtbot):

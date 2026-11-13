@@ -296,6 +296,8 @@ class ProcedureWindow(QMainWindow):
             get_experiment_info=self._experiment_info,
             queue_host=self._queue_host,
             procedure_classes=self._procedure_classes,
+            get_sample_info=self._get_sample_info,
+            get_data_dir=self._get_data_dir,
         )
         self._queue_panel.setMinimumHeight(120)
         split.addWidget(self._queue_panel)
@@ -654,6 +656,12 @@ class ProcedureWindow(QMainWindow):
     def _on_abort(self) -> None:
         """Ask for confirmation, then abort the running procedure.
 
+        An abort **holds** the queue (the queue-hold standard): the next
+        waiting run starts only when the operator presses Resume Queue. When
+        runs are waiting, the confirmation offers the second thing an
+        operator who aborts usually wants — to throw the rest of the queue
+        away too — so a bad queue never has to be deleted row by row.
+
         A no-op while an operation is active — this window is operation-
         blind (the hard status separation — see ``GLOSSARY.md``): its Abort
         button must never act on a running operation (e.g. a
@@ -662,13 +670,43 @@ class ProcedureWindow(QMainWindow):
         """
         if self._mirror.active_run_kind() == "operation":
             return
-        answer = QMessageBox.question(
-            self,
-            "Abort Procedure",
-            "Abort the running procedure? The data file will be saved as-is.",
+        waiting = self._queue_panel.waiting_count()
+        if waiting == 0:
+            answer = QMessageBox.question(
+                self,
+                "Abort Procedure",
+                "Abort the running procedure? The data file will be saved as-is.",
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                self._orchestrator.abort_procedure()
+            return
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Abort Procedure")
+        box.setText(
+            "Abort the running procedure? The data file will be saved as-is."
         )
-        if answer == QMessageBox.StandardButton.Yes:
-            self._queue_panel.notify_aborted()
+        box.setInformativeText(
+            f"{waiting} run(s) are waiting in the queue. Hold them so you can "
+            "check or edit them first, or clear them all?"
+        )
+        hold_btn = box.addButton(
+            "Abort, hold queue", QMessageBox.ButtonRole.AcceptRole
+        )
+        hold_btn.setObjectName("abort_hold_queue_btn")
+        clear_btn = box.addButton(
+            "Abort and clear queue", QMessageBox.ButtonRole.DestructiveRole
+        )
+        clear_btn.setObjectName("abort_clear_queue_btn")
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(hold_btn)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is clear_btn:
+            # Cleared first, so there is nothing left for the abort to hold.
+            self._queue_panel.clear_waiting()
+            self._orchestrator.abort_procedure()
+        elif clicked is hold_btn:
             self._orchestrator.abort_procedure()
 
     def _on_progress(self, fraction: float) -> None:
@@ -690,10 +728,13 @@ class ProcedureWindow(QMainWindow):
         self._plot2.redraw(self._datapoints)
 
     def _on_procedure_finished(self) -> None:
-        """Reset progress bar, clear the active procedure, advance the queue."""
+        """Fill the progress bar and clear the active procedure.
+
+        The queue's rows follow the engine's own ``RunFinished`` event, so
+        nothing here advances them.
+        """
         self._progress_bar.setValue(100)
         self._active_procedure = None
-        self._queue_panel.notify_finished()
 
     # ------------------------------------------------------------------
     # Plot helpers
@@ -786,6 +827,24 @@ class ProcedureWindow(QMainWindow):
         self._queue_panel.restore_items(
             session_state.queue, self._params_panel.procedure_by_name
         )
+
+    def apply_session_queue(self, session_state: FormAutosaveState) -> None:
+        """Show another experiment's queue in place of the current one.
+
+        The queue belongs to the experiment: when a different experiment
+        becomes the open one, its own saved queue replaces whatever this
+        window was showing (the form's parameters are left alone).
+
+        Args:
+            session_state: The incoming experiment's saved GUI state.
+        """
+        self._queue_panel.restore_items(
+            session_state.queue, self._params_panel.procedure_by_name
+        )
+
+    def clear_queue_history(self) -> None:
+        """Drop the finished rows, e.g. when a new experiment starts."""
+        self._queue_panel.clear_finished()
 
     def export_session_state(self, state: FormAutosaveState) -> None:
         """Write this window's selection, params, and queue into ``state``."""

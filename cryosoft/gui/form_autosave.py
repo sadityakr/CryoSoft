@@ -39,12 +39,16 @@ _SCHEMA_VERSION = 1
 _DEFAULT_DATA_DIR = ""
 
 # Queue-item lifecycle states (a queued procedure moves pending -> running ->
-# done|failed). Exposed as constants so callers never hard-code the strings.
+# done|aborted|failed). Exposed as constants so callers never hard-code the
+# strings.
 STATUS_PENDING = "pending"
 STATUS_RUNNING = "running"
 STATUS_DONE = "done"
+STATUS_ABORTED = "aborted"
 STATUS_FAILED = "failed"
-_VALID_STATUSES = frozenset({STATUS_PENDING, STATUS_RUNNING, STATUS_DONE, STATUS_FAILED})
+_VALID_STATUSES = frozenset(
+    {STATUS_PENDING, STATUS_RUNNING, STATUS_DONE, STATUS_ABORTED, STATUS_FAILED}
+)
 
 
 def _as_str(value: object, default: str = "") -> str:
@@ -67,7 +71,14 @@ class QueueItemState:
         sample_info: The ``{sample_name, sample_id, comments}`` captured when the
             item was queued (a queued run keeps the metadata it was created with).
         data_dir: The data directory captured when the item was queued.
-        status: One of ``pending``, ``running``, ``done``, ``failed``.
+        file_prefix: Optional filename prefix.
+        status: One of ``pending``, ``running``, ``done``, ``aborted``,
+            ``failed``.
+        probe_spec: The **probe run** reduction (a ``ProbeSpec``'s dict form)
+            when the item is a probe, ``{}`` otherwise — kept so a restored
+            probe comes back as the probe, never as the full run it probes.
+        reason: Why the item ended as it did (a failure's message), ``""``
+            otherwise.
     """
 
     procedure: str = ""
@@ -76,6 +87,8 @@ class QueueItemState:
     data_dir: str = _DEFAULT_DATA_DIR
     file_prefix: str = ""
     status: str = STATUS_PENDING
+    probe_spec: dict[str, object] = field(default_factory=dict)
+    reason: str = ""
 
     def to_dict(self) -> dict[str, object]:
         """Return a JSON-safe dict representation."""
@@ -86,6 +99,8 @@ class QueueItemState:
             "data_dir": self.data_dir,
             "file_prefix": self.file_prefix,
             "status": self.status,
+            "probe_spec": dict(self.probe_spec),
+            "reason": self.reason,
         }
 
     @classmethod
@@ -108,6 +123,8 @@ class QueueItemState:
             data_dir=_as_str(data.get("data_dir"), _DEFAULT_DATA_DIR),
             file_prefix=_as_str(data.get("file_prefix")),
             status=status,
+            probe_spec=_as_str_dict(data.get("probe_spec")),
+            reason=_as_str(data.get("reason")),
         )
 
 

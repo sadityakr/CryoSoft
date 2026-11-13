@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import time
 from typing import TYPE_CHECKING, Any
@@ -84,6 +85,23 @@ logger = logging.getLogger(__name__)
 
 # QSettings keys for persisted window/layout state.
 _GEOMETRY_KEY = "MonitorWindow/geometry"
+
+
+def _without_queue(
+    state: form_autosave.FormAutosaveState,
+) -> form_autosave.FormAutosaveState:
+    """Return *state* with no run queue — the per-user file's shape.
+
+    The run queue belongs to an experiment and is persisted only in that
+    experiment's ``gui_state.json``; the per-user file carries form fields.
+
+    Args:
+        state: A loaded or collected session state.
+
+    Returns:
+        A copy whose ``queue`` is empty.
+    """
+    return dataclasses.replace(state, queue=[])
 # Namespaced distinctly from any earlier layout scheme's settings (the
 # pre-dock splitter-grid MonitorWindow used a plain "MonitorWindow/main_splitter"
 # key; QSplitter.restoreState() restores orientation/child-count from the
@@ -353,8 +371,14 @@ class MonitorWindow(QMainWindow):
                 else form_autosave.FormAutosaveState()
             )
         else:
-            self._session = form_autosave.load(
-                app_settings.autosave_file_path(self._current_user_id)
+            # The run queue belongs to an experiment: with none open, the
+            # per-user file restores the form fields only, never a queue —
+            # a queue that came back from "last time, somewhere" is exactly
+            # the stale list that confuses an operator.
+            self._session = _without_queue(
+                form_autosave.load(
+                    app_settings.autosave_file_path(self._current_user_id)
+                )
             )
 
         self.setWindowTitle("CryoSoft — Monitor")
@@ -1313,10 +1337,13 @@ class MonitorWindow(QMainWindow):
         )
         if is_session_open:
             path = session_manager.current_gui_state_path()
+            saved = self._session
         else:
             path = app_settings.autosave_file_path(self._current_user_id)
+            # No experiment, no persisted queue (see __init__).
+            saved = _without_queue(self._session)
         try:
-            form_autosave.save(self._session, path)
+            form_autosave.save(saved, path)
         except OSError as exc:
             logger.warning("MonitorWindow: could not save session: %s", exc)
         if is_session_open:
@@ -1411,7 +1438,9 @@ class MonitorWindow(QMainWindow):
         self._save_session()
         self._current_user_id = user_id
         app_settings.set_current_user_id(user_id)
-        self._session = form_autosave.load(app_settings.autosave_file_path(user_id))
+        self._session = _without_queue(
+            form_autosave.load(app_settings.autosave_file_path(user_id))
+        )
         self._session_info.apply_session(self._session)
         self._sync_current_user_label()
         self._follow_user_session(user_id)
@@ -1746,17 +1775,31 @@ class MonitorWindow(QMainWindow):
             record: ``ExperimentRecord.to_dict()``, or ``{}`` when none open.
         """
         experiment_id = record.get("experiment_id", "") if record else ""
-        if not experiment_id or experiment_id == self._last_session_experiment_id:
-            self._last_session_experiment_id = experiment_id or None
+        if experiment_id == (self._last_session_experiment_id or ""):
             return
-        self._last_session_experiment_id = experiment_id
-        if self._session_manager is None:
-            return
-        gui_state_path = self._session_manager.current_gui_state_path()
+        self._last_session_experiment_id = experiment_id or None
+        gui_state_path = (
+            self._session_manager.current_gui_state_path()
+            if self._session_manager is not None and experiment_id
+            else None
+        )
         if gui_state_path is None or not gui_state_path.exists():
+            # Closed, or brand new: nothing saved to load. An open Procedure
+            # window keeps what is waiting (runs queued just before Start
+            # Experiment belong to it) but drops the rows of runs that
+            # already ran under the previous experiment; with no window open
+            # nothing is queued, and the leftover saved list is not carried
+            # into this experiment.
+            self._session.queue = []
+            if self._procedure_window is not None:
+                self._procedure_window.clear_queue_history()
             return
         self._session = form_autosave.load(gui_state_path)
         self._session_info.apply_session(self._session)
+        # The queue belongs to the experiment: the incoming one's own saved
+        # queue replaces whatever the Procedure window was showing.
+        if self._procedure_window is not None:
+            self._procedure_window.apply_session_queue(self._session)
 
     def _on_store_health_changed(self, info: dict) -> None:
         """Surface a session-record save failure/recovery via the banner + status bar.

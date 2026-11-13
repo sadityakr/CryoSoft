@@ -23,7 +23,9 @@ from cryosoft.session.run_queue import (
     FINDING_ENVELOPE,
     FINDING_PARAM_BOUNDS,
     FINDING_UNKNOWN_PARAM,
+    FINDING_UNKNOWN_RUN,
     KIND_OPERATION,
+    QUEUE_FILE_FORMAT,
     KIND_PROCEDURE,
     RunFinding,
     RunQueue,
@@ -31,6 +33,8 @@ from cryosoft.session.run_queue import (
     RunSpec,
     RunValidation,
     build_run,
+    queue_document,
+    specs_from_document,
     validate_run,
 )
 
@@ -573,3 +577,98 @@ def test_build_run_constructs_the_operation_the_spec_names(station):
     assert isinstance(run, HeliumFillOperation)
     assert run.run_kind == "operation"
     assert run.get_params()["person"] == "AK"
+
+
+# ── The queue hold's bookkeeping, and the queue file ─────────────────────────
+
+
+def _host(station):
+    return RunQueueHost(station=station, run_catalog={"FieldSweep": FieldSweep})
+
+
+def test_a_built_run_names_the_queue_entry_it_came_from(station, tmp_path):
+    """build_run tags the run so the engine's manifest can name the entry."""
+    spec = RunSpec(
+        kind=KIND_PROCEDURE,
+        run_class="FieldSweep",
+        params=FAST_PARAMS,
+        data_directory=str(tmp_path),
+    )
+    run = build_run(spec, station=station, run_catalog={"FieldSweep": FieldSweep})
+    assert run.queue_spec_id == spec.spec_id
+
+
+def test_the_host_tells_a_started_entry_from_a_removed_one(station, tmp_path):
+    """was_taken: pulled by the engine, as opposed to removed by someone."""
+    host = _host(station)
+    first, _ = host.add(FieldSweep, FAST_PARAMS, data_directory=str(tmp_path))
+    second, _ = host.add(FieldSweep, FAST_PARAMS, data_directory=str(tmp_path))
+
+    assert host.take_next_spec() == first
+    host.remove(second.spec_id)
+
+    assert host.was_taken(first.spec_id)
+    assert not host.was_taken(second.spec_id)
+
+
+def test_add_from_spec_revalidates_and_issues_a_fresh_id(station, tmp_path):
+    """An imported spec is checked again and queued as a new entry."""
+    host = _host(station)
+    original = RunSpec(
+        kind=KIND_PROCEDURE,
+        run_class="FieldSweep",
+        params=FAST_PARAMS,
+        data_directory=str(tmp_path),
+        probe_spec={"n_points": 2},
+    )
+    queued, validation = host.add_from_spec(original)
+    assert validation.ok and queued is not None
+    assert queued.spec_id != original.spec_id
+    assert queued.probe_spec["n_points"] == 2
+
+    bad = RunSpec(
+        kind=KIND_PROCEDURE,
+        run_class="FieldSweep",
+        params=dict(FAST_PARAMS, field_end=50.0),
+        data_directory=str(tmp_path),
+    )
+    refused, validation = host.add_from_spec(bad)
+    assert refused is None and not validation.ok
+
+
+def test_add_from_spec_refuses_a_class_this_setup_does_not_know(station):
+    host = _host(station)
+    refused, validation = host.add_from_spec(_spec(run_class="NoSuchSweep"))
+    assert refused is None
+    assert [f.code for f in validation.findings] == [FINDING_UNKNOWN_RUN]
+
+
+def test_a_queue_file_round_trips_through_json():
+    specs = [_spec(params={"a": 1}), _spec(file_prefix="x")]
+    document = json.loads(json.dumps(queue_document(specs, setup="12t-cryo")))
+
+    parsed, setup, problems = specs_from_document(document)
+
+    assert document["format"] == QUEUE_FILE_FORMAT
+    assert setup == "12t-cryo" and problems == []
+    assert [s.to_json() for s in parsed] == [s.to_json() for s in specs]
+
+
+def test_a_queue_file_skips_one_bad_run_and_keeps_the_rest():
+    document = queue_document([_spec()])
+    document["runs"].append({"kind": "nonsense", "run_class": "X"})
+    document["runs"].append("not a run")
+
+    parsed, _setup, problems = specs_from_document(document)
+
+    assert len(parsed) == 1
+    assert len(problems) == 2
+
+
+@pytest.mark.parametrize(
+    "document",
+    [{"runs": []}, {"format": QUEUE_FILE_FORMAT, "version": 99, "runs": []}, []],
+)
+def test_a_document_that_is_not_a_readable_queue_file_is_refused(document):
+    with pytest.raises(ValueError):
+        specs_from_document(document)

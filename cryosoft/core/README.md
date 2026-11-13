@@ -101,13 +101,20 @@ is the typed currency shared by all of them.
   emit, would starve queued operations, and — seeing only a state name —
   could not tell a clean finish from a **hold acknowledge**, so it would
   auto-start a run straight after an emergency standby. Six transitions reach
-  IDLE and only two chain (`abort_procedure()` and `_finish_run()`'s IDLE end
-  state); the other four — error recovery, the emergency acknowledge, a run
-  failed for an instrument fault, and a completed *manual* ramp — deliberately
-  do not. `run_queue()`'s docstring is the list. Every queue mutation is
-  broadcast as a `QueueChanged` event naming the actor behind it;
-  `publish_queue()` is how a client that changed the queue outside the engine
-  asks for that broadcast.
+  IDLE and only one chains: `_finish_run()`'s IDLE end state. Every other end
+  of a run — an abort, an error, an emergency, a run failed for an
+  instrument fault, a queued run that could not be built — sets the **queue
+  hold** (GLOSSARY.md), so the next waiting run starts only on an explicit
+  `run_queue()`, which is the one thing that releases it;
+  `set_queue_hold(held)` sets or withdraws it by hand ("stop after the
+  current run"), and a hold on an empty queue holds nothing.
+  `run_queue()`'s docstring is the list. Every queue mutation is broadcast as
+  a `QueueChanged` event naming the actor behind it and carrying `held` /
+  `hold_reason`; `publish_queue()` is how a client that changed the queue
+  outside the engine asks for that broadcast. The run manifest (and so
+  `RunStarted`/`RunFinished`) carries the `spec_id` of the queue entry a run
+  was built from (read duck-typed off the run as `queue_spec_id`), which is
+  how a client follows each queued row to its end.
 
 - `Orchestrator.submit(Command) -> request_id` is the **engine port**: the
   single entry point for a client that speaks the control contract

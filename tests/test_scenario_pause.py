@@ -535,19 +535,15 @@ def test_abort_while_paused_closes_the_file_with_partial_data_and_finishes_abort
     assert list(points) == [0.0]  # exactly the partial data, nothing more, nothing lost
 
 
-def test_abort_while_paused_chains_into_a_queued_run_by_design(
+def test_abort_while_paused_holds_a_queued_run_until_run_queue(
     orchestrator, station, tmp_path
 ):
-    """Documents an intentional design point the scenario brief did not expect.
+    """Abort from PAUSED settles in IDLE with the queue held, never chaining.
 
-    ``abort_procedure()`` is one of the two call sites that deliberately
-    chains into ``run_queue()`` (see its own docstring: "The operator ended
-    THIS run, not the queue") — so a procedure queued before an abort DOES
-    start immediately, and the engine passes through IDLE only for the
-    instant between the two. This is not a defect; it is written down here so
-    "abort while paused never auto-starts the queue" is not silently assumed
-    to hold everywhere it might be relied on. Direct handover (via
-    ``queue_procedure()``) is the queue path this run itself exercises.
+    The queue-hold standard: an operator who aborts ended the run because
+    something was wrong, so the next waiting run must not inherit it. The
+    queued procedure starts only on the explicit ``run_queue()`` that
+    releases the hold.
     """
     _fast_magnet(station)
     procedure = PauseProbeProcedure(station, tmp_path)
@@ -562,12 +558,14 @@ def test_abort_while_paused_chains_into_a_queued_run_by_design(
 
     orchestrator.abort_procedure()
 
-    states = [c.state for c in recorder.of_type(ev.StateChange)]
-    assert "IDLE" in states, "abort still passes through IDLE on its way to the next run"
-    # But it does not STAY there: run_queue() pulled the queued procedure
-    # within the same abort_procedure() call.
-    assert orchestrator._state != OrchestratorState.IDLE
+    assert orchestrator._state == OrchestratorState.IDLE
+    assert orchestrator._procedure is None
+    held = [c for c in recorder.of_type(ev.QueueChanged) if c.held]
+    assert held and held[-1].hold_reason == ev.QUEUE_HOLD_ABORTED
+
+    orchestrator.run_queue()
     assert orchestrator._procedure is queued
+    assert recorder.of_type(ev.QueueChanged)[-1].held is False
 
     orchestrator.abort_procedure()  # clean up the second run too
 

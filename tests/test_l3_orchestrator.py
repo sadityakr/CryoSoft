@@ -3776,6 +3776,9 @@ def test_queueing_from_a_state_changed_slot_does_not_start_a_run_inside_the_emit
     orchestrator.run_procedure(MockProcedure(station))
 
     orchestrator.abort_procedure()
+    # The abort held the queue (the queue-hold standard); the queued run starts
+    # on the explicit run_queue() that releases it — still after the emit.
+    orchestrator.run_queue()
 
     assert observed == [None], "a run started inside the state_changed emit"
     assert isinstance(orchestrator._procedure, MockProcedure)
@@ -3825,6 +3828,141 @@ def test_error_recovery_does_not_chain_the_queue(orchestrator, station):
 
     assert orchestrator._state == OrchestratorState.IDLE
     assert orchestrator._procedure_queue == [queued]
+
+
+# ── The queue hold: only a clean finish chains ──────────────────────────────
+
+
+def _last_queue_changed(events):
+    return [e for e in events if isinstance(e, ev.QueueChanged)][-1]
+
+
+def test_abort_holds_the_queue_instead_of_chaining(orchestrator, station):
+    """The operator aborted for a reason; the next run must not inherit it."""
+    events: list = []
+    orchestrator.event_emitted.connect(events.append)
+    orchestrator.run_procedure(MockProcedure(station))
+    queued = MockProcedure(station)
+    orchestrator.queue_procedure(queued)
+
+    orchestrator.abort_procedure()
+
+    assert orchestrator._state == OrchestratorState.IDLE
+    assert orchestrator._procedure_queue == [queued]
+    last = _last_queue_changed(events)
+    assert last.held and last.hold_reason == ev.QUEUE_HOLD_ABORTED
+
+
+def test_run_queue_releases_the_hold_and_starts_the_next_run(orchestrator, station):
+    events: list = []
+    orchestrator.event_emitted.connect(events.append)
+    orchestrator.run_procedure(MockProcedure(station))
+    queued = MockProcedure(station)
+    orchestrator.queue_procedure(queued)
+    orchestrator.abort_procedure()
+
+    orchestrator.run_queue()
+
+    assert orchestrator._procedure is queued
+    assert not orchestrator._queue_held
+    assert any(isinstance(e, ev.QueueChanged) and not e.held for e in events)
+    orchestrator.abort_procedure()
+
+
+def test_a_held_queue_does_not_chain_after_a_clean_finish(
+    orchestrator, station, qtbot
+):
+    """set_queue_hold(True) is "stop after the current run"."""
+    station.magnet_z._default_ramp_rate = 6000.0
+    station.magnet_z._ramp_segments = []
+    orchestrator.run_procedure(MockProcedure(station))
+    queued = MockProcedure(station)
+    orchestrator.queue_procedure(queued)
+
+    orchestrator.set_queue_hold(True)
+    with qtbot.waitSignal(orchestrator.procedure_finished, timeout=2000):
+        pass
+
+    assert orchestrator._state == OrchestratorState.IDLE
+    assert orchestrator._procedure_queue == [queued]
+
+
+def test_withdrawing_the_hold_lets_a_clean_finish_chain_again(
+    orchestrator, station, qtbot
+):
+    station.magnet_z._default_ramp_rate = 6000.0
+    station.magnet_z._ramp_segments = []
+    orchestrator.run_procedure(MockProcedure(station))
+    queued = MockProcedure(station)
+    orchestrator.queue_procedure(queued)
+    orchestrator.set_queue_hold(True)
+
+    orchestrator.set_queue_hold(False)
+    with qtbot.waitSignal(orchestrator.procedure_finished, timeout=2000):
+        pass
+
+    assert orchestrator._procedure is queued
+    orchestrator.abort_procedure()
+
+
+def test_a_hold_on_an_empty_queue_holds_nothing(orchestrator, station):
+    """Nothing waiting, nothing held — runs queued later start from clean."""
+    orchestrator.run_procedure(MockProcedure(station))
+    orchestrator.abort_procedure()
+    assert not orchestrator._queue_held
+
+    orchestrator.set_queue_hold(True)
+    assert not orchestrator._queue_held
+
+
+def test_emptying_a_held_queue_releases_the_hold(orchestrator, station):
+    orchestrator.run_procedure(MockProcedure(station))
+    orchestrator.queue_procedure(MockProcedure(station))
+    orchestrator.abort_procedure()
+    assert orchestrator._queue_held
+
+    orchestrator._procedure_queue.clear()
+    orchestrator.publish_queue()
+
+    assert not orchestrator._queue_held
+
+
+def test_a_run_failed_for_a_fault_holds_the_queue(orchestrator, station):
+    events: list = []
+    orchestrator.event_emitted.connect(events.append)
+    orchestrator.run_procedure(MockProcedure(station))
+    orchestrator.queue_procedure(MockProcedure(station))
+
+    orchestrator._fail_run_for_fault("magnet_z")
+
+    last = _last_queue_changed(events)
+    assert last.held and last.hold_reason == ev.QUEUE_HOLD_FAILED
+
+
+def test_an_error_holds_the_queue_so_recovery_needs_run_queue(orchestrator, station):
+    orchestrator.queue_procedure(MockProcedure(station))
+    orchestrator._fail_to_error("something unknown broke")
+    assert orchestrator._queue_held
+
+    orchestrator.recover_from_error()
+
+    assert orchestrator._queue_held, "recovery is not a request to carry on"
+
+
+def test_the_run_manifest_names_the_queue_entry(orchestrator, station):
+    """RunStarted/RunFinished carry the spec_id a queued run was built from."""
+    events: list = []
+    orchestrator.event_emitted.connect(events.append)
+    run = MockProcedure(station)
+    run.queue_spec_id = "abc123"
+    orchestrator.run_procedure(run)
+    orchestrator.abort_procedure()
+
+    started = [e for e in events if isinstance(e, ev.RunStarted)]
+    finished = [e for e in events if isinstance(e, ev.RunFinished)]
+    assert started and started[-1].manifest["spec_id"] == "abc123"
+    assert finished[-1].manifest["spec_id"] == "abc123"
+    assert finished[-1].status == "aborted"
 
 
 # ── QueueChanged: every mutation is broadcast, and names its actor ───────────

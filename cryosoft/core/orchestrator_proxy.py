@@ -565,6 +565,17 @@ class OrchestratorProxy(QObject):
         """
         return self._submit(ev.CommandName.RUN_QUEUE)
 
+    def set_queue_hold(self, held: bool) -> str:
+        """Set or withdraw the **queue hold** ("stop after the current run").
+
+        Args:
+            held: True to hold the queue, False to withdraw the hold.
+
+        Returns:
+            The command's request id.
+        """
+        return self._submit(ev.CommandName.SET_QUEUE_HOLD, held=bool(held))
+
     # ── The queue seam — not commands ──────────────────────────────────
     # The waiting queue is data in the session layer and the engine pulls
     # from it, so these three are how a client that OWNS that queue reaches

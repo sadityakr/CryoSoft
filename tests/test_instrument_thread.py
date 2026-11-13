@@ -306,6 +306,7 @@ _COMMANDS: tuple[tuple[str, tuple[Any, ...], dict[str, Any]], ...] = (
     ("acknowledge_fault", ("magnet_y",), {}),
     ("retry_fault", ("magnet_y",), {}),
     ("set_experiment_envelope", (None,), {}),
+    ("set_queue_hold", (True,), {}),
     ("run_queue", (), {}),
     ("pause_procedure", (), {}),
     ("resume_procedure", (), {}),

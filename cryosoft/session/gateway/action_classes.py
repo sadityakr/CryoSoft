@@ -139,7 +139,13 @@ COMMAND_ACTION_CLASSES: dict[CommandName, ClassifiedAction] = {
         ActionClass.RUN_CONTROL, "As queue_procedure, for an operation."
     ),
     CommandName.RUN_QUEUE: ClassifiedAction(
-        ActionClass.RUN_CONTROL, "Pulls the next queued run and starts it."
+        ActionClass.RUN_CONTROL,
+        "Pulls the next queued run and starts it; releases a queue hold.",
+    ),
+    CommandName.SET_QUEUE_HOLD: ClassifiedAction(
+        ActionClass.RECOVERY,
+        "Holds the queue after the current run, or withdraws that hold; "
+        "starts and stops nothing by itself.",
     ),
     CommandName.PAUSE_PROCEDURE: ClassifiedAction(
         ActionClass.RECOVERY,

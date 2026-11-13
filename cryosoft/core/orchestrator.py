@@ -584,6 +584,13 @@ class Orchestrator(QObject):
         # queue_operation()/run_queue() and the "queue-jumping, not
         # preemption".
         self._operation_queue: list[Any] = []
+        # The **queue hold** (GLOSSARY.md): while set, nothing starts the
+        # next waiting run on its own — not a clean finish, not anything
+        # else. Set by every non-clean end of a run and by set_queue_hold();
+        # released only by an explicit run_queue() (or by the queue running
+        # empty). The reason is one of events.QUEUE_HOLD_*.
+        self._queue_held = False
+        self._queue_hold_reason = ""
         # Who queued each run handed over as a live object, keyed by id() —
         # the two queues hold the objects themselves (callers index into
         # them), so the actor rides alongside rather than inside. Entries are
@@ -1654,6 +1661,7 @@ class Orchestrator(QObject):
         except Exception as exc:  # noqa: BLE001 — a client queue never kills the engine
             logger.exception("next_procedure() failed; queue not advanced")
             self._action_blocked(f"Could not start the next queued run: {exc}")
+            self._hold_queue(ev.QUEUE_HOLD_FAILED)
             return None
         # The **run owner** a queued run inherits, read off the built run
         # duck-typed (contract C5 keeps this module from importing the queue
@@ -1677,27 +1685,32 @@ class Orchestrator(QObject):
         seeing only a state name, could not tell a clean finish from a hold
         acknowledge.
 
-        That last point is why this is called from exactly two places inside
-        the engine, and never from the transition itself. Six transitions
-        reach IDLE; only two chain:
+        That last point is why the engine chains from exactly one place, and
+        never from the transition itself. Six transitions reach IDLE; only a
+        clean finish chains, and every other end of a run sets the **queue
+        hold** (GLOSSARY.md) so the queue cannot carry on by itself:
 
-        * ``abort_procedure()`` — chains. The operator ended THIS run, not
-          the queue.
-        * ``_finish_run()`` when the run's end state is IDLE — chains. The
-          run completed, so the next one is due; this is also what drains a
-          queued operation ahead of a queued procedure.
-        * ``recover_from_error()`` — no chain. After an error the queue's
-          assumptions may no longer hold; the operator restarts explicitly.
-        * ``_acknowledge_emergency()`` — no chain. Acknowledging a quench is
-          not a request to carry on measuring.
-        * ``_fail_run_for_fault()`` — no chain. A run that failed for an
+        * ``_finish_run()`` when the run's end state is IDLE — chains through
+          ``_chain_queue()``, unless the queue is held. The run completed, so
+          the next one is due; this is also what drains a queued operation
+          ahead of a queued procedure.
+        * ``abort_procedure()`` — holds. The operator ended the run because
+          something was wrong, and the next run would inherit it.
+        * ``recover_from_error()`` — no chain (``_fail_to_error()`` held the
+          queue). After an error the queue's assumptions may no longer hold.
+        * ``_acknowledge_emergency()`` — no chain (emergency entry held the
+          queue). Acknowledging a quench is not a request to carry on.
+        * ``_fail_run_for_fault()`` — holds. A run that failed for an
           instrument fault or a safety hold must not silently auto-continue.
         * ``_tick_body()``'s RAMPING branch when a MANUAL ramp completes — no
           chain. Nobody asked for a run; the operator was driving by hand.
 
-        Refused outside IDLE with a reason; an empty queue is NOT a refusal —
-        the queue simply ran to completion — so it returns quietly and the
-        command is accepted.
+        Calling this command is the one thing that RELEASES a hold: it is the
+        explicit "carry on" a held queue waits for.
+
+        Refused outside IDLE with a reason (the hold, if any, stays); an
+        empty queue is NOT a refusal — the queue simply ran to completion —
+        so it returns quietly and the command is accepted.
         """
         if self._state != OrchestratorState.IDLE:
             message = (
@@ -1707,6 +1720,12 @@ class Orchestrator(QObject):
             logger.info("Blocked run_queue: %s", message)
             self._action_blocked(message)
             return
+        if self._queue_held:
+            self._queue_held = False
+            self._queue_hold_reason = ""
+            logger.info("Queue hold released by run_queue")
+            self._emit_status("Queue resumed")
+            self._emit_queue_changed()
         if self._operation_queue:
             operation = self._take_queued(self._operation_queue)
             self._emit_queue_changed()
@@ -1741,6 +1760,64 @@ class Orchestrator(QObject):
             actor: Who made the change, defaulting to the operator sentinel.
         """
         self._emit_queue_changed(actor)
+
+    @command
+    def set_queue_hold(self, held: bool) -> None:
+        """Set or withdraw the **queue hold** without touching the active run.
+
+        Holding is "stop after the current run": the active run carries on to
+        its end, and then nothing further starts until ``run_queue()``.
+        Withdrawing a hold lets a clean finish chain again; it starts nothing
+        by itself — an IDLE engine with a waiting queue still needs
+        ``run_queue()``. A hold on an empty queue holds nothing, so asking
+        for one there is accepted and changes nothing.
+
+        Args:
+            held: True to hold the queue, False to withdraw the hold.
+        """
+        if held:
+            if not self._hold_queue(ev.QUEUE_HOLD_REQUESTED):
+                self._emit_status("Nothing is waiting in the queue to hold")
+            return
+        if not self._queue_held:
+            return
+        self._queue_held = False
+        self._queue_hold_reason = ""
+        logger.info("Queue hold withdrawn")
+        self._emit_status("Queue hold withdrawn")
+        self._emit_queue_changed()
+
+    def _hold_queue(self, reason: str) -> bool:
+        """Hold the run queue, if anything is waiting in it.
+
+        Args:
+            reason: One of ``events.QUEUE_HOLD_*``.
+
+        Returns:
+            True if the queue is now held; False when nothing is waiting, in
+            which case there is nothing to hold and no hold is set.
+        """
+        if not self._queue_entries():
+            return False
+        changed = not self._queue_held or self._queue_hold_reason != reason
+        self._queue_held = True
+        self._queue_hold_reason = reason
+        if changed:
+            logger.info("Run queue held (%s)", reason)
+            self._emit_queue_changed()
+        return True
+
+    def _chain_queue(self) -> None:
+        """Start the next waiting run after a clean finish, unless held.
+
+        The one automatic advance of the queue (see ``run_queue()``). A held
+        queue says so on the status line instead, so an operator who asked
+        for "stop after this run" sees that it did.
+        """
+        if self._queue_held:
+            self._emit_status("Queue held — press Run Queue to continue")
+            return
+        self.run_queue()
 
     def _queue_entry(self, run: Any, kind: str) -> dict[str, Any]:
         """Render one directly-handed-over run as a queue entry.
@@ -1797,9 +1874,18 @@ class Orchestrator(QObject):
                 to the actor of the command in flight, which is right for
                 every mutation the engine makes itself.
         """
+        entries = self._queue_entries()
+        if self._queue_held and not entries:
+            # A hold on an empty queue holds nothing: once the last waiting
+            # run is gone, so is the hold, and runs queued afterwards start
+            # from a clean slate.
+            self._queue_held = False
+            self._queue_hold_reason = ""
         self._emit_event(
             ev.QueueChanged(
-                entries=self._queue_entries(),
+                entries=entries,
+                held=self._queue_held,
+                hold_reason=self._queue_hold_reason,
                 actor=actor if actor is not None else self._current_actor(),
                 request_id=self._pending.request_id if self._pending else "",
                 seq=self._next_seq(),
@@ -1943,7 +2029,9 @@ class Orchestrator(QObject):
 
         Closes the data file (partial data preserved), sends the procedure's
         measurement safe-off commands, stops all active ramps with a hardware
-        hold, and returns to IDLE. Ignored during EMERGENCY — the emergency
+        hold, and returns to IDLE with the run queue **held** — the next
+        waiting run starts only on an explicit ``run_queue()``. Ignored during
+        EMERGENCY — the emergency
         flow owns cleanup there and is exited via acknowledge().
 
         Owner-scoped for agents (the run-ownership standard, see
@@ -1957,11 +2045,16 @@ class Orchestrator(QObject):
                 "Cannot abort during EMERGENCY — acknowledge the emergency first"
             )
             return
+        had_run = self._procedure is not None
         self._abort_active_procedure()
         self._emit_run_finished("aborted")
         self._change_state(OrchestratorState.IDLE)
         self._emit_status("Aborted by user")
-        self.run_queue()
+        # The queue hold: the operator ended THIS run because something was
+        # wrong, and the next waiting run would inherit whatever it was. The
+        # queue waits until someone has looked and presses Run Queue.
+        if had_run:
+            self._hold_queue(ev.QUEUE_HOLD_ABORTED)
 
     def active_ramps(self) -> list[RampRecord]:
         """Return the ramps running as of the last tick, ordered by VI name.
@@ -3062,6 +3155,11 @@ class Orchestrator(QObject):
             "params": params,
             "data_file": str(getattr(procedure, "data_filepath", None) or ""),
             "started_utc": datetime.now(timezone.utc).isoformat(),
+            # The queue entry this run was built from (``RunSpec.spec_id``,
+            # read duck-typed like ``queued_by``), so a client can tell which
+            # queued row is now running and how it ended. "" for a run that
+            # never came from the queue.
+            "spec_id": str(getattr(procedure, "queue_spec_id", "") or ""),
         }
         self._datapoint_index = 0
         self.run_started.emit(dict(self._active_run_manifest))
@@ -4632,7 +4730,7 @@ class Orchestrator(QObject):
         self._emit_status(f"{label} finished")
         self._emit_run_finished("done", postconditions_unmet=postconditions_unmet)
         # procedure_finished is PROCEDURE-EXCLUSIVE (the hard status
-        # separation) — the Procedure window's queue-advance/progress-reset
+        # separation) — the Procedure window's progress-reset
         # handler must never fire for an operation's completion.
         if not is_operation:
             self.procedure_finished.emit()
@@ -4653,7 +4751,7 @@ class Orchestrator(QObject):
         self._operation_started_from_emergency = False
         self._change_state(end_state, cause="procedure_finished")
         if end_state == OrchestratorState.IDLE:
-            self.run_queue()
+            self._chain_queue()
 
     def _fail_to_error(self, message: str) -> None:
         """Contain a failure: clean up the run and degrade to ERROR.
@@ -4676,6 +4774,7 @@ class Orchestrator(QObject):
             logger.exception("Cleanup while entering ERROR also failed")
         self._emit_run_finished("failed", reason=message)
         self._change_state(OrchestratorState.ERROR, cause="error")
+        self._hold_queue(ev.QUEUE_HOLD_FAILED)
 
     def _fail_run_for_fault(self, vi_name: str, reason: str | None = None) -> None:
         """Fail the active run because its claimed/watched VI faulted or was held.
@@ -4713,6 +4812,7 @@ class Orchestrator(QObject):
             logger.exception("Cleanup while failing run for VI fault also failed")
         self._emit_run_finished("failed", reason=message)
         self._change_state(OrchestratorState.IDLE, cause="fault")
+        self._hold_queue(ev.QUEUE_HOLD_FAILED)
 
     def _enter_emergency(self, reason: str, vi_names: tuple[str, ...] = ()) -> None:
         """One-shot emergency entry: clean up the run, then safe shutdown.
@@ -4769,6 +4869,7 @@ class Orchestrator(QObject):
             logger.exception("Cleanup while entering EMERGENCY failed")
         self._emit_run_finished("failed", reason=f"EMERGENCY: {reason}")
         self._change_state(OrchestratorState.EMERGENCY, cause="emergency")
+        self._hold_queue(ev.QUEUE_HOLD_FAILED)
         # Always a blanket standby_all(): critical severity is station-wide
         # scope by construction (the System-Condition standard, core/
         # conditions.py) — there is no "concerned VI" subset to narrow the

@@ -518,6 +518,15 @@ QWidget#notification_banner[severity="warning"] QPushButton#banner_dismiss_btn {
     color: {BANNER_WARNING_TEXT};
 }}
 
+/* ── Queue hold strip (QueuePanel) — the warning banner's validated pair ── */
+QLabel#queue_hold_label {{
+    background-color: {BANNER_WARNING_BG};
+    color: {BANNER_WARNING_TEXT};
+    border-left: 3px solid {BANNER_WARNING_BORDER};
+    border-radius: 4px;
+    padding: 4px 8px;
+}}
+
 /* ── Labels — value readout (instrument values) ──────────────────────── */
 /* Kept just above the 10pt field label and bold so values still read as the
    emphasised element, while staying compact enough to show full numbers. */

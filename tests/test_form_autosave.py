@@ -133,3 +133,21 @@ def test_save_overwrites_previous_session(tmp_path: Path):
     session.save(FormAutosaveState(sample_name="first"), path)
     session.save(FormAutosaveState(sample_name="second"), path)
     assert session.load(path).sample_name == "second"
+
+
+
+def test_queue_item_keeps_aborted_status_probe_and_reason():
+    """An aborted row, a probe's reduction and a failure reason round-trip."""
+    item = QueueItemState(
+        procedure="Field Sweep",
+        status=session.STATUS_ABORTED,
+        probe_spec={"n_points": 3},
+        reason="operator aborted",
+    )
+    back = QueueItemState.from_dict(json.loads(json.dumps(item.to_dict())))
+    assert back == item
+
+
+def test_an_older_queue_item_without_the_new_fields_still_loads():
+    back = QueueItemState.from_dict({"procedure": "Field Sweep", "status": "done"})
+    assert back.probe_spec == {} and back.reason == ""

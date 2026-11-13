@@ -322,7 +322,9 @@ def test_operation_queue_drains_before_procedure_queue(orchestrator, station, qt
     orchestrator.queue_procedure(queued_proc)
     orchestrator.queue_operation(queued_op)
 
-    orchestrator.abort_procedure()  # returns to IDLE, calls run_queue()
+    orchestrator.abort_procedure()  # returns to IDLE with the queue held
+    assert orchestrator._procedure is None
+    orchestrator.run_queue()  # releases the hold
 
     assert orchestrator._procedure is queued_op
     assert queued_proc in orchestrator._procedure_queue  # procedure untouched, still queued

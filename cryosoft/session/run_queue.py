@@ -74,6 +74,15 @@ FINDING_PARAM_BOUNDS = "param_bounds"
 FINDING_CONTROL_LIMIT = "control_limit"
 #: A setpoint the run would command outside the open experiment's envelope.
 FINDING_ENVELOPE = "envelope"
+#: A spec names a class the run catalog does not hold (an imported queue file
+#: written on a setup with procedures this one does not have).
+FINDING_UNKNOWN_RUN = "unknown_run"
+
+#: The ``format`` tag of a **queue file** — the exported run queue — so a JSON
+#: file that is something else is refused by name rather than half-parsed.
+QUEUE_FILE_FORMAT = "cryosoft-queue"
+#: The queue file's schema version. A reader refuses a newer one.
+QUEUE_FILE_VERSION = 1
 
 
 def _json_value(value: Any) -> Any:
@@ -515,6 +524,9 @@ def build_run(
         object because that object is all the engine ever receives — the
         spec stays here — and it is read duck-typed there, since contract C5
         forbids the engine from importing this module to learn the type.
+        ``queue_spec_id`` rides along the same way: the engine copies it into
+        the run manifest, which is how ``RunStarted``/``RunFinished`` name the
+        queue entry a run came from.
 
     Raises:
         KeyError: If the catalog holds no class of that name.
@@ -543,6 +555,7 @@ def build_run(
             probe=ProbeSpec.from_json(spec.probe_spec) if spec.probe_spec else None,
         )
     run.queued_by = spec.actor
+    run.queue_spec_id = spec.spec_id
     return run
 
 
@@ -843,6 +856,11 @@ class RunQueueHost:
         self._experiment_info = experiment_info
         self._envelope = envelope
         self._queue = RunQueue()
+        # Every spec_id the engine has pulled out of this queue to run, so a
+        # client can tell an entry that left because it STARTED from one that
+        # was removed. Only ids, and only ever appended to — small enough to
+        # keep for the life of the process.
+        self._taken: set[str] = set()
 
     @property
     def queue(self) -> RunQueue:
@@ -966,6 +984,59 @@ class RunQueueHost:
         self._broadcast(actor)
         return spec, validation
 
+    def add_from_spec(
+        self, spec: RunSpec, *, actor: Actor = OPERATOR
+    ) -> tuple[RunSpec | None, RunValidation]:
+        """Validate a spec made elsewhere and, if it passes, queue a copy.
+
+        The import path — a **queue file**, or a queue restored from an
+        experiment's saved state. Everything ``add()`` checks is checked
+        again against THIS setup and the experiment open NOW, because neither
+        is guaranteed to be the one the spec was written for. The copy gets a
+        fresh ``spec_id``, so importing the same file twice queues two runs.
+
+        Args:
+            spec: The spec to re-validate.
+            actor: Who is queueing it.
+
+        Returns:
+            ``(spec, validation)`` as ``add()`` returns them; a class the run
+            catalog does not hold is refused with ``FINDING_UNKNOWN_RUN``.
+        """
+        run_class = self._run_catalog.get(spec.run_class)
+        if run_class is None:
+            return None, RunValidation(
+                findings=(
+                    RunFinding(
+                        FINDING_UNKNOWN_RUN,
+                        f"{spec.run_class} is not a {spec.kind} this setup knows",
+                        spec.run_class,
+                    ),
+                )
+            )
+        return self.add(
+            run_class,
+            spec.params,
+            kind=spec.kind,
+            sample_info=spec.sample_info,
+            data_directory=spec.data_directory,
+            file_prefix=spec.file_prefix,
+            probe_spec=spec.probe_spec or None,
+            actor=actor,
+        )
+
+    def was_taken(self, spec_id: str) -> bool:
+        """Return True if the engine pulled this entry out of the queue to run it.
+
+        Args:
+            spec_id: A ``RunSpec.spec_id``.
+
+        Returns:
+            True for an entry that left the queue by starting (or by failing
+            to start), False for one still waiting or one that was removed.
+        """
+        return spec_id in self._taken
+
     def add_spec(self, spec: RunSpec) -> RunSpec:
         """Queue an already-built spec, unvalidated.
 
@@ -1040,6 +1111,7 @@ class RunQueueHost:
         spec = self._queue.pop_next()
         if spec is None:
             return None
+        self._taken.add(spec.spec_id)
         # The spec has left the queue; a build that later refuses must not
         # leave clients rendering an entry that is gone.
         self._broadcast(spec.actor)
@@ -1095,6 +1167,7 @@ class RunQueueHost:
         spec = self._queue.pop_next()
         if spec is None:
             return None
+        self._taken.add(spec.spec_id)
         try:
             return build_run(
                 spec,
@@ -1127,3 +1200,77 @@ class RunQueueHost:
         """Tell the injected publisher the queue changed, if there is one."""
         if self._publish is not None:
             self._publish(actor)
+
+
+# ── The queue file ────────────────────────────────────────────────────
+
+
+def queue_document(
+    specs: Iterable[RunSpec], *, setup: str = ""
+) -> dict[str, Any]:
+    """Render waiting runs as a **queue file** document (JSON-safe).
+
+    The exported form of a run queue: what the operator asked for, spec by
+    spec, so the same queue can be re-imported later, on another day or by
+    another user. It carries no status — a queue file is a plan, not a log.
+
+    Args:
+        specs: The specs to export, in run order.
+        setup: The setup the queue was built for (``Station.setup_name``), so
+            an import on a different setup can say so.
+
+    Returns:
+        ``{"format", "version", "setup", "exported_utc", "runs"}``.
+    """
+    return {
+        "format": QUEUE_FILE_FORMAT,
+        "version": QUEUE_FILE_VERSION,
+        "setup": setup,
+        "exported_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "runs": [spec.to_json() for spec in specs],
+    }
+
+
+def specs_from_document(document: Any) -> tuple[list[RunSpec], str, list[str]]:
+    """Parse a **queue file** document back into specs.
+
+    Tolerant per run, strict about the file: a document that is not a queue
+    file, or comes from a newer schema, is refused outright; a single
+    malformed run inside a valid file is skipped and reported, so one bad
+    entry never costs the operator the rest of the queue. Nothing here
+    validates a run against a setup — that is ``RunQueueHost.add_from_spec``.
+
+    Args:
+        document: The parsed JSON.
+
+    Returns:
+        ``(specs, setup, problems)`` — the parsed specs in file order, the
+        setup the file names (``""`` when it names none), and one line per
+        skipped run.
+
+    Raises:
+        ValueError: If *document* is not a queue file this version can read.
+    """
+    if not isinstance(document, dict) or document.get("format") != QUEUE_FILE_FORMAT:
+        raise ValueError("not a CryoSoft queue file")
+    version = document.get("version")
+    if not isinstance(version, int) or version > QUEUE_FILE_VERSION:
+        raise ValueError(
+            f"queue file version {version!r} is newer than this app reads "
+            f"({QUEUE_FILE_VERSION})"
+        )
+    runs = document.get("runs")
+    if not isinstance(runs, list):
+        raise ValueError("queue file has no list of runs")
+    specs: list[RunSpec] = []
+    problems: list[str] = []
+    for index, payload in enumerate(runs, start=1):
+        if not isinstance(payload, dict):
+            problems.append(f"run {index}: not an object")
+            continue
+        try:
+            specs.append(RunSpec.from_json(payload))
+        except (TypeError, ValueError) as exc:
+            problems.append(f"run {index}: {exc}")
+    setup = document.get("setup")
+    return specs, setup if isinstance(setup, str) else "", problems

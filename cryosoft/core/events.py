@@ -371,6 +371,7 @@ class CommandName(str, Enum):
     QUEUE_PROCEDURE = "queue_procedure"
     QUEUE_OPERATION = "queue_operation"
     RUN_QUEUE = "run_queue"
+    SET_QUEUE_HOLD = "set_queue_hold"
     PAUSE_PROCEDURE = "pause_procedure"
     RESUME_PROCEDURE = "resume_procedure"
     ABORT_PROCEDURE = "abort_procedure"
@@ -1203,12 +1204,25 @@ class RunFinished(_ContractMessage):
             )
 
 
+#: Why a run queue is held (``QueueChanged.hold_reason``). The **queue hold**
+#: standard: every way a run can end other than completing cleanly holds the
+#: queue, so a problem stops the queue rather than the next run inheriting it.
+QUEUE_HOLD_ABORTED = "aborted"
+QUEUE_HOLD_FAILED = "failed"
+QUEUE_HOLD_REQUESTED = "requested"
+
+
 @dataclass(frozen=True)
 class QueueChanged(_ContractMessage):
-    """The run queue's contents changed.
+    """The run queue's contents, or its **queue hold**, changed.
 
     Attributes:
         entries: One JSON-safe dict per queued run, in run order.
+        held: True while the queue is held — the engine will not start the
+            next waiting run on its own (see GLOSSARY.md's *Queue hold*);
+            only an explicit ``run_queue`` releases it.
+        hold_reason: Why the queue is held, one of the ``QUEUE_HOLD_*``
+            values, or ``""`` when it is not.
         actor: Who changed it.
         request_id: The command that changed it, or ``""``.
         seq: Monotonic sequence number.
@@ -1218,6 +1232,8 @@ class QueueChanged(_ContractMessage):
     kind: ClassVar[str] = "queue_changed"
 
     entries: tuple[dict[str, Any], ...] = ()
+    held: bool = False
+    hold_reason: str = ""
     actor: Actor = OPERATOR
     request_id: str = ""
     seq: int = 0
